@@ -1,0 +1,3 @@
+[submodule "src/external/zBlueBerry"]
+	path = src/external/zBlueBerry
+	url = https://github.com/patrickelectric/zBlueBerry
