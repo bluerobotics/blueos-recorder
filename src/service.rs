@@ -1,12 +1,14 @@
-use std::{any::Any, collections::{BTreeMap, HashMap}, fs::File, io::BufWriter, sync::Arc, time::{SystemTime, UNIX_EPOCH}};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs::File,
+    io::BufWriter,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::Result;
-use foxglove::{Context, McapWriterHandle};
 use mcap::Writer;
-use zenoh::{
-    Config, Session, bytes::Encoding, handlers::FifoChannelHandler, pubsub::Subscriber,
-    sample::Sample,
-};
+use serde_json::{Value, json};
+use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
 struct Channel {
     channel_id: u16,
@@ -15,17 +17,20 @@ struct Channel {
 
 impl Channel {
     pub fn new(channel_id: u16) -> Self {
-        Self { channel_id, sequence: 0 }
+        Self {
+            channel_id,
+            sequence: 0,
+        }
     }
 }
 
 struct Mcap {
-    context: Arc<Context>,
     writer: Writer<BufWriter<File>>,
     channel: HashMap<String, Channel>,
 }
 
 pub struct Service {
+    #[allow(dead_code)]
     session: Session,
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
@@ -42,9 +47,36 @@ fn load_cdr_schema(schema: &str) -> Result<String> {
     let current_dir = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get current directory: {e}"))?;
     let current_dir_string = current_dir.display().to_string();
-    let schema_path =
-        format!("{current_dir_string}/src/external/zBlueberry/msgs/{schema_package}/{schema_name}.msg");
-    std::fs::read_to_string(&schema_path).map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path})"))
+    let schema_path = format!(
+        "{current_dir_string}/src/external/zBlueberry/msgs/{schema_package}/{schema_name}.msg"
+    );
+    std::fs::read_to_string(&schema_path)
+        .map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path})"))
+}
+
+fn create_schema(value: &Value) -> Value {
+    match value {
+        Value::Null => json!({ "type": "null" }),
+        Value::Bool(_) => json!({ "type": "boolean" }),
+        Value::Number(n) if n.is_i64() => json!({ "type": "integer" }),
+        Value::Number(_) => json!({ "type": "number" }),
+        Value::String(_) => json!({ "type": "string" }),
+        Value::Array(arr) => {
+            let items = if let Some(first) = arr.first() {
+                create_schema(first)
+            } else {
+                json!({})
+            };
+            json!({ "type": "array", "items": items })
+        }
+        Value::Object(map) => {
+            let properties: BTreeMap<_, _> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), create_schema(v)))
+                .collect();
+            json!({ "type": "object", "properties": properties })
+        }
+    }
 }
 
 impl Service {
@@ -57,7 +89,6 @@ impl Service {
             std::fs::remove_file(filename).unwrap();
         }
 
-        let context = Context::new();
         let writer = Writer::new(BufWriter::new(
             std::fs::File::create(filename).expect("Failed to create file"),
         ))
@@ -67,7 +98,6 @@ impl Service {
             session,
             subscriber,
             mcap: Mcap {
-                context,
                 writer,
                 channel: HashMap::new(),
             },
@@ -75,57 +105,79 @@ impl Service {
     }
 
     pub async fn run(&mut self) {
+        let mut last_flush = SystemTime::now();
         while let Ok(sample) = self.subscriber.recv_async().await {
             let topic = sample.key_expr().to_string();
             let payload = sample.payload();
             let encoding = sample.encoding();
-            let encoding_string = sample.encoding().to_string();
+            let encoding_string = encoding.to_string();
             let mut encoding_string_splitted = encoding_string.split(";");
             let encoding_string_0 = encoding_string_splitted.nth(0).unwrap();
             let encoding_string_1 = encoding_string_splitted.nth(0);
 
+            // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
             if !self.mcap.channel.contains_key(&topic) {
-                let (encoding, schema_description, msg_encoding) = match (encoding_string_0, encoding_string_1) {
-                    ("application/cdr", Some(schema)) => {
-                        let schema = match load_cdr_schema(schema) {
-                            Ok(schema) => schema,
-                            Err(e) => {
-                                log::error!("{topic}: Failed to load schema: {e}");
+                let (encoding, schema_description, msg_encoding) =
+                    match (encoding_string_0, encoding_string_1) {
+                        ("application/cdr", Some(schema)) => {
+                            let schema = match load_cdr_schema(schema) {
+                                Ok(schema) => schema,
+                                Err(e) => {
+                                    log::error!("{topic}: Failed to load schema: {e}");
+                                    continue;
+                                }
+                            };
+                            ("ros2msg", schema, "cdr")
+                        }
+                        ("application/json", _) => {
+                            let Ok(string) = payload.try_to_string() else {
+                                log::warn!("{topic}: Failed to decode payload as UTF-8 string");
+                                continue;
+                            };
+                            let Ok(value) = serde_json5::from_str::<Value>(&string) else {
+                                log::warn!("{topic}: Failed to parse payload as JSON5: {string}");
+                                continue;
+                            };
+                            // Foxglove does not support non-object messages
+                            if !value.is_object() {
                                 continue;
                             }
-                        };
-                        ("ros2msg", schema, "cdr")
-                    }
-                    ("application/json", schema) => {
-                        continue;
-                    },
-                    _ => {
-                        log::warn!("{topic}: Received unknown encoding: {:?}", encoding_string);
-                        continue;
-                    }
-                };
+                            let schema = create_schema(&value).to_string();
+                            ("jsonschema", schema, "json")
+                        }
+                        _ => {
+                            log::warn!("{topic}: Received unknown encoding: {:?}", encoding_string);
+                            continue;
+                        }
+                    };
 
-                /*
-                let schema = match encoding_string_1 {
-                    Some(schema) => schema.to_string(),
-                    None => {
-                        log::warn!("{topic}: Received unknown encoding: {:?}", encoding_string);
-                        continue;
-                    }
-                };*/
-                let Ok(schema_id) = self.mcap.writer.add_schema(&encoding_string_1.unwrap(), encoding, schema_description.as_bytes()) else {
+                log::info!("{topic}: Adding schema: {encoding_string}");
+                log::info!("Schema description: {schema_description}");
+                let name_backup = format!("{}", topic.replace("/", "."));
+                let name = encoding_string_1.unwrap_or(&name_backup);
+                let Ok(schema_id) =
+                    self.mcap
+                        .writer
+                        .add_schema(name, encoding, schema_description.as_bytes())
+                else {
                     log::warn!("{topic}: Failed to add schema: {:?}", encoding_string);
                     continue;
                 };
 
-                let Ok(channel_id) = self.mcap.writer.add_channel(schema_id, &topic, msg_encoding, &BTreeMap::new()) else {
+                let Ok(channel_id) =
+                    self.mcap
+                        .writer
+                        .add_channel(schema_id, &topic, msg_encoding, &BTreeMap::new())
+                else {
                     log::warn!("{topic}: Failed to add channel: {:?}", encoding_string);
                     continue;
                 };
-                self.mcap.channel.insert(topic.clone(), Channel::new(channel_id));
+                self.mcap
+                    .channel
+                    .insert(topic.clone(), Channel::new(channel_id));
             }
 
-            let mut channel = self.mcap.channel.get_mut(&topic).unwrap();
+            let channel = self.mcap.channel.get_mut(&topic).unwrap();
             let now = SystemTime::now();
             let duration = now.duration_since(UNIX_EPOCH).unwrap();
             let timestamp = duration.as_nanos() as u64;
@@ -139,62 +191,15 @@ impl Service {
                 &payload.to_bytes(),
             ) {
                 log::error!("{topic}: Failed to write message: {e}");
-                continue
+                continue;
             }
             channel.sequence += 1;
 
-            if channel.sequence % 100 == 0 {
-                log::info!("{topic}: Received {} messages", channel.sequence);
+            if now.duration_since(last_flush).unwrap() > std::time::Duration::from_secs(30) {
+                log::info!("Flushing writer");
+                self.mcap.writer.flush().expect("Failed to flush writer");
+                last_flush = now;
             }
-
-            if channel.sequence > 400 {
-                break;
-            }
-
-
-            /*
-            match *encoding {
-                Encoding::ZENOH_BYTES => {
-                    // Don't know what to do with it, let just store
-                    println!("Received zenoh/bytes from: {:?}", sample.key_expr());
-                }
-                Encoding::APPLICATION_JSON => {
-                    // Cool and nice json messages
-                    let Ok(payload_string) = String::from_utf8(payload.to_bytes().into()) else {
-                        log::warn!("{topic}: {encoding} message is not valid string to decode json: {:?}", payload.to_bytes());
-                        continue;
-                    };
-
-                    let Ok(json) = serde_json::from_str::<serde_json::Value>(&payload_string) else {
-                        log::warn!("{topic}: {encoding} message is not valid json: {:?}", payload.to_bytes());
-                        continue;
-                    };
-
-                    // record json here
-                    //println!("Received json: {json:?}");
-                    continue;
-                }
-                Encoding::APPLICATION_CDR => {
-                    // Time for hardcode binary messages man
-                    println!("{topic}: Received encoding: {:?}", sample.encoding());
-                    println!("{topic}: Received encoding id: {:?}", sample.encoding().id());
-                    println!("{topic}: Received from utf-8: {:?}", String::from_utf8(sample.encoding().schema().unwrap().to_vec()));
-                    println!("{topic}: Received to_string: {:?}", sample.encoding().to_string());
-                    //let encoding_string = encoding.to_string();
-                    //let schema = encoding_string.split(";").nth(1);
-                    //println!("Received: {:?}", encoding_string);
-                }
-                _ => {
-                    match encoding_string_0 {
-                        "application/json" => {
-                            println!("{topic}: Received json");
-                        }
-                        _ => {
-                            println!("{topic}: Received unknown encoding: {:?}", encoding_string);
-                        }
-                    }
-                }
-            }*/
         }
     }
 }
