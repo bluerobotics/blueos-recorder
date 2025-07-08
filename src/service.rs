@@ -25,7 +25,7 @@ impl Channel {
 }
 
 struct Mcap {
-    writer: Writer<BufWriter<File>>,
+    writer: Option<Writer<BufWriter<File>>>,
     channel: HashMap<String, Channel>,
 }
 
@@ -38,11 +38,11 @@ pub struct Service {
 
 fn load_cdr_schema(schema: &str) -> Result<String> {
     let mut schema_splitted = schema.split(".");
-    let schema_package = schema_splitted.nth(0).ok_or(anyhow::anyhow!(
+    let schema_package = schema_splitted.next().ok_or(anyhow::anyhow!(
         "Failed to get schema package from {schema}"
     ))?;
     let schema_name = schema_splitted
-        .nth(0)
+        .next()
         .ok_or(anyhow::anyhow!("Failed to get schema name from {schema}"))?;
     let current_dir = std::env::current_dir()
         .map_err(|e| anyhow::anyhow!("Failed to get current directory: {e}"))?;
@@ -79,6 +79,19 @@ fn create_schema(value: &Value) -> Value {
     }
 }
 
+fn generate_filename() -> String {
+    let now = SystemTime::now();
+    let datetime = now
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .expect("Time went backwards");
+    let datetime = chrono::DateTime::<chrono::Utc>::from_timestamp(
+        datetime.as_secs() as i64,
+        datetime.subsec_nanos(),
+    )
+    .expect("Invalid timestamp");
+    format!("recorder_{}.mcap", datetime.format("%Y%m%d_%H%M%S"))
+}
+
 impl Service {
     pub async fn new(config: Config) -> Self {
         let session = zenoh::open(config).await.unwrap();
@@ -89,16 +102,11 @@ impl Service {
             std::fs::remove_file(filename).unwrap();
         }
 
-        let writer = Writer::new(BufWriter::new(
-            std::fs::File::create(filename).expect("Failed to create file"),
-        ))
-        .expect("Failed to create writer");
-
         Self {
             session,
             subscriber,
             mcap: Mcap {
-                writer,
+                writer: None,
                 channel: HashMap::new(),
             },
         }
@@ -106,14 +114,46 @@ impl Service {
 
     pub async fn run(&mut self) {
         let mut last_flush = SystemTime::now();
+        let base_mode_regex = regex::Regex::new(r"mavlink/\d+/1/HEARTBEAT/base_mode").unwrap();
         while let Ok(sample) = self.subscriber.recv_async().await {
             let topic = sample.key_expr().to_string();
             let payload = sample.payload();
             let encoding = sample.encoding();
             let encoding_string = encoding.to_string();
             let mut encoding_string_splitted = encoding_string.split(";");
-            let encoding_string_0 = encoding_string_splitted.nth(0).unwrap();
-            let encoding_string_1 = encoding_string_splitted.nth(0);
+            let encoding_string_0 = encoding_string_splitted.next().unwrap();
+            let encoding_string_1 = encoding_string_splitted.next();
+
+            if base_mode_regex.is_match(&topic) {
+                if let Ok(string) = payload.try_to_string() {
+                    if let Ok(value) = serde_json5::from_str::<Value>(&string) {
+                        if let Some(base_mode) = value.get("bits") {
+                            if let Some(base_mode_value) = base_mode.as_u64() {
+                                // https://mavlink.io/en/messages/common.html#MAV_MODE_FLAG_SAFETY_ARMED
+                                if base_mode_value & 0b10000000 != 0 {
+                                    if self.mcap.writer.is_none() {
+                                        let filename = generate_filename();
+                                        let writer = Writer::new(BufWriter::new(
+                                            std::fs::File::create(&filename)
+                                                .expect("Failed to create file"),
+                                        ))
+                                        .expect("Failed to create writer");
+                                        self.mcap.writer = Some(writer);
+                                        self.mcap.channel.clear();
+                                    }
+                                } else if let Some(mut writer) = self.mcap.writer.take() {
+                                    writer.finish().expect("Failed to finish writer");
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            if self.mcap.writer.is_none() {
+                continue;
+            }
+            let writer = self.mcap.writer.as_mut().unwrap();
 
             // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
             if !self.mcap.channel.contains_key(&topic) {
@@ -146,30 +186,26 @@ impl Service {
                             ("jsonschema", schema, "json")
                         }
                         _ => {
-                            log::warn!("{topic}: Received unknown encoding: {:?}", encoding_string);
+                            log::warn!("{topic}: Received unknown encoding: {encoding_string:?}");
                             continue;
                         }
                     };
 
                 log::info!("{topic}: Adding schema: {encoding_string}");
                 log::info!("Schema description: {schema_description}");
-                let name_backup = format!("{}", topic.replace("/", "."));
+                let name_backup = topic.replace("/", ".").to_string();
                 let name = encoding_string_1.unwrap_or(&name_backup);
                 let Ok(schema_id) =
-                    self.mcap
-                        .writer
-                        .add_schema(name, encoding, schema_description.as_bytes())
+                    writer.add_schema(name, encoding, schema_description.as_bytes())
                 else {
-                    log::warn!("{topic}: Failed to add schema: {:?}", encoding_string);
+                    log::warn!("{topic}: Failed to add schema: {encoding_string:?}");
                     continue;
                 };
 
                 let Ok(channel_id) =
-                    self.mcap
-                        .writer
-                        .add_channel(schema_id, &topic, msg_encoding, &BTreeMap::new())
+                    writer.add_channel(schema_id, &topic, msg_encoding, &BTreeMap::new())
                 else {
-                    log::warn!("{topic}: Failed to add channel: {:?}", encoding_string);
+                    log::warn!("{topic}: Failed to add channel: {encoding_string:?}");
                     continue;
                 };
                 self.mcap
@@ -181,7 +217,7 @@ impl Service {
             let now = SystemTime::now();
             let duration = now.duration_since(UNIX_EPOCH).unwrap();
             let timestamp = duration.as_nanos() as u64;
-            if let Err(e) = self.mcap.writer.write_to_known_channel(
+            if let Err(e) = writer.write_to_known_channel(
                 &mcap::records::MessageHeader {
                     channel_id: channel.channel_id,
                     sequence: channel.sequence,
@@ -197,7 +233,12 @@ impl Service {
 
             if now.duration_since(last_flush).unwrap() > std::time::Duration::from_secs(30) {
                 log::info!("Flushing writer");
-                self.mcap.writer.flush().expect("Failed to flush writer");
+                self.mcap
+                    .writer
+                    .as_mut()
+                    .unwrap()
+                    .flush()
+                    .expect("Failed to flush writer");
                 last_flush = now;
             }
         }
@@ -207,6 +248,8 @@ impl Service {
 impl Drop for Service {
     fn drop(&mut self) {
         log::info!("Finishing writer");
-        self.mcap.writer.finish().expect("Failed to finish writer");
+        if let Some(mut writer) = self.mcap.writer.take() {
+            writer.finish().expect("Failed to finish writer");
+        }
     }
 }
