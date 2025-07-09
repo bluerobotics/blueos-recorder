@@ -67,6 +67,7 @@ pub struct Service {
     session: Session,
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
+    recorder_path: std::path::PathBuf,
 }
 
 fn load_cdr_schema(schema: &str) -> Result<String> {
@@ -126,7 +127,7 @@ fn generate_filename() -> String {
 }
 
 impl Service {
-    pub async fn new(config: Config) -> Self {
+    pub async fn new(config: Config, recorder_path: std::path::PathBuf) -> Self {
         let session = zenoh::open(config)
             .await
             .expect("Failed to open zenoh session");
@@ -142,6 +143,7 @@ impl Service {
                 writer: None,
                 channel: HashMap::new(),
             },
+            recorder_path,
         }
     }
 
@@ -166,7 +168,8 @@ impl Service {
                                 if base_mode_value & 0b10000000 != 0 {
                                     if self.mcap.writer.is_none() {
                                         let filename = generate_filename();
-                                        self.mcap = Mcap::new(std::path::Path::new(&filename));
+                                        let path = self.recorder_path.join(filename);
+                                        self.mcap = Mcap::new(std::path::Path::new(&path));
                                     }
                                 } else {
                                     self.mcap.finish();
