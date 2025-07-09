@@ -29,6 +29,39 @@ struct Mcap {
     channel: HashMap<String, Channel>,
 }
 
+impl Mcap {
+    fn new(path: &std::path::Path) -> Self {
+        let writer = Writer::new(BufWriter::new(
+            std::fs::File::create(path).expect("Failed to create file"),
+        ))
+        .expect("Failed to create writer");
+        Self {
+            writer: Some(writer),
+            channel: HashMap::new(),
+        }
+    }
+
+    fn finish(&mut self) {
+        if let Some(mut writer) = self.writer.take() {
+            writer.finish().expect("Failed to finish writer");
+        }
+    }
+
+    fn flush(&mut self) {
+        if let Some(writer) = self.writer.as_mut() {
+            log::info!("Flushing writer");
+            writer.flush().expect("Failed to flush writer");
+        }
+    }
+}
+
+impl Drop for Mcap {
+    fn drop(&mut self) {
+        log::info!("Finishing writer");
+        self.finish();
+    }
+}
+
 pub struct Service {
     #[allow(dead_code)]
     session: Session,
@@ -133,16 +166,10 @@ impl Service {
                                 if base_mode_value & 0b10000000 != 0 {
                                     if self.mcap.writer.is_none() {
                                         let filename = generate_filename();
-                                        let writer = Writer::new(BufWriter::new(
-                                            std::fs::File::create(&filename)
-                                                .expect("Failed to create file"),
-                                        ))
-                                        .expect("Failed to create writer");
-                                        self.mcap.writer = Some(writer);
-                                        self.mcap.channel.clear();
+                                        self.mcap = Mcap::new(std::path::Path::new(&filename));
                                     }
-                                } else if let Some(mut writer) = self.mcap.writer.take() {
-                                    writer.finish().expect("Failed to finish writer");
+                                } else {
+                                    self.mcap.finish();
                                 }
                             }
                         }
@@ -240,24 +267,9 @@ impl Service {
             channel.sequence += 1;
 
             if now.duration_since(last_flush).unwrap() > std::time::Duration::from_secs(30) {
-                log::info!("Flushing writer");
-                self.mcap
-                    .writer
-                    .as_mut()
-                    .expect("Failed to get mcap writer")
-                    .flush()
-                    .expect("Failed to flush writer");
+                self.mcap.flush();
                 last_flush = now;
             }
-        }
-    }
-}
-
-impl Drop for Service {
-    fn drop(&mut self) {
-        log::info!("Finishing writer");
-        if let Some(mut writer) = self.mcap.writer.take() {
-            writer.finish().expect("Failed to finish writer");
         }
     }
 }
