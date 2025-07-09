@@ -94,8 +94,13 @@ fn generate_filename() -> String {
 
 impl Service {
     pub async fn new(config: Config) -> Self {
-        let session = zenoh::open(config).await.unwrap();
-        let subscriber = session.declare_subscriber("**").await.unwrap();
+        let session = zenoh::open(config)
+            .await
+            .expect("Failed to open zenoh session");
+        let subscriber = session
+            .declare_subscriber("**")
+            .await
+            .expect("Failed to declare global zenoh subscriber");
 
         Self {
             session,
@@ -148,7 +153,11 @@ impl Service {
             if self.mcap.writer.is_none() {
                 continue;
             }
-            let writer = self.mcap.writer.as_mut().unwrap();
+            let writer = self
+                .mcap
+                .writer
+                .as_mut()
+                .expect("Failed to get mcap writer");
 
             // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
             if !self.mcap.channel.contains_key(&topic) {
@@ -208,7 +217,11 @@ impl Service {
                     .insert(topic.clone(), Channel::new(channel_id));
             }
 
-            let channel = self.mcap.channel.get_mut(&topic).unwrap();
+            let channel = self
+                .mcap
+                .channel
+                .get_mut(&topic)
+                .expect("Failed to get mcap channel");
             let now = SystemTime::now();
             let duration = now.duration_since(UNIX_EPOCH).unwrap();
             let timestamp = duration.as_nanos() as u64;
@@ -231,7 +244,7 @@ impl Service {
                 self.mcap
                     .writer
                     .as_mut()
-                    .unwrap()
+                    .expect("Failed to get mcap writer")
                     .flush()
                     .expect("Failed to flush writer");
                 last_flush = now;
