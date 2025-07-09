@@ -97,11 +97,6 @@ impl Service {
         let session = zenoh::open(config).await.unwrap();
         let subscriber = session.declare_subscriber("**").await.unwrap();
 
-        let filename = "recorder.mcap";
-        if std::path::Path::new(filename).exists() {
-            std::fs::remove_file(filename).unwrap();
-        }
-
         Self {
             session,
             subscriber,
