@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1.0.98"
 chrono = "0.4.41"
-clap = { version = "4.0", features = ["derive"] }
+clap = { version = "4.5.41", features = ["derive"] }
 env_logger = "0.11.8"
 foxglove = "0.9.0"
 log = "0.4.27"
