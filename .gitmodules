@@ -1,3 +1,3 @@
-[submodule "src/external/zBlueBerry"]
-	path = src/external/zBlueBerry
-	url = https://github.com/patrickelectric/zBlueBerry
+[submodule "src/external/zBlueberry"]
+	path = src/external/zBlueberry
+	url = https://github.com/patrickelectric/zBlueberry
