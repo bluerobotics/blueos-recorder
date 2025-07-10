@@ -8,7 +8,7 @@ async fn main() -> anyhow::Result<()> {
     if cli::is_verbose() {
         env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
     } else {
-        env_logger::init();
+        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     }
 
     let mut config = zenoh::Config::default();
