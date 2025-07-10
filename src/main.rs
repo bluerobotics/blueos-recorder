@@ -16,7 +16,7 @@ async fn main() -> anyhow::Result<()> {
         .insert_json5("mode", r#""client""#)
         .expect("Failed to insert client mode");
     config
-        .insert_json5("connect/endpoints", r#"["tcp/192.168.31.177:7447"]"#)
+        .insert_json5("connect/endpoints", r#"["tcp/127.0.0.1:7447"]"#)
         .expect("Failed to insert connection endpoint");
     config
         .insert_json5("adminspace", r#"{"enabled": true}"#)
