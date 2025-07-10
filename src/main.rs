@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
             .unwrap_or_else(|error| panic!("Failed to insert {key}: {error}"));
     }
 
-    let mut service = Service::new(config, cli::recorder_path()).await;
+    let mut service = Service::new(config, cli::recorder_path(), cli::schema_path()).await;
     service.run().await;
 
     Ok(())
