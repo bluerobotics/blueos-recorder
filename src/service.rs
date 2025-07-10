@@ -68,9 +68,10 @@ pub struct Service {
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
     recorder_path: std::path::PathBuf,
+    schema_path: std::path::PathBuf,
 }
 
-fn load_cdr_schema(schema: &str) -> Result<String> {
+fn load_cdr_schema(schema: &str, schema_path: &std::path::Path) -> Result<String> {
     let mut schema_splitted = schema.split(".");
     let schema_package = schema_splitted.next().ok_or(anyhow::anyhow!(
         "Failed to get schema package from {schema}"
@@ -78,14 +79,9 @@ fn load_cdr_schema(schema: &str) -> Result<String> {
     let schema_name = schema_splitted
         .next()
         .ok_or(anyhow::anyhow!("Failed to get schema name from {schema}"))?;
-    let current_dir = std::env::current_dir()
-        .map_err(|e| anyhow::anyhow!("Failed to get current directory: {e}"))?;
-    let current_dir_string = current_dir.display().to_string();
-    let schema_path = format!(
-        "{current_dir_string}/src/external/zBlueberry/msgs/{schema_package}/{schema_name}.msg"
-    );
+    let schema_path = schema_path.join(format!("{schema_package}/{schema_name}.msg"));
     std::fs::read_to_string(&schema_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path})"))
+        .map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path:?})"))
 }
 
 fn create_schema(value: &Value) -> Value {
@@ -127,7 +123,11 @@ fn generate_filename() -> String {
 }
 
 impl Service {
-    pub async fn new(config: Config, recorder_path: std::path::PathBuf) -> Self {
+    pub async fn new(
+        config: Config,
+        recorder_path: std::path::PathBuf,
+        schema_path: std::path::PathBuf,
+    ) -> Self {
         let session = zenoh::open(config)
             .await
             .expect("Failed to open zenoh session");
@@ -144,6 +144,7 @@ impl Service {
                 channel: HashMap::new(),
             },
             recorder_path,
+            schema_path,
         }
     }
 
@@ -194,7 +195,7 @@ impl Service {
                 let (encoding, schema_description, msg_encoding) =
                     match (encoding_string_0, encoding_string_1) {
                         ("application/cdr", Some(schema)) => {
-                            let schema = match load_cdr_schema(schema) {
+                            let schema = match load_cdr_schema(schema, &self.schema_path) {
                                 Ok(schema) => schema,
                                 Err(e) => {
                                     log::error!("{topic}: Failed to load schema: {e}");
