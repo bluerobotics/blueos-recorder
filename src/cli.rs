@@ -23,6 +23,10 @@ pub struct Args {
     #[arg(long, default_value = "/tmp")]
     recorder_path: String,
 
+    /// Sets the path for message schemas.
+    #[arg(long, default_value = "src/external/zBlueberry/msgs")]
+    schema_path: String,
+
     /// Zenoh configuration key-value pairs. Can be used multiple times.
     /// Format: --zkey key=value
     #[arg(long, value_name = "KEY=VALUE", num_args = 1..)]
@@ -64,27 +68,32 @@ pub fn is_verbose() -> bool {
     args().verbose
 }
 
-/// Returns the recorder path
-pub fn recorder_path() -> std::path::PathBuf {
-    let recorder_path = args().recorder_path.clone();
+pub fn path_dir_from_arg(arg: &str) -> std::path::PathBuf {
+    let path = std::path::PathBuf::from(arg);
 
-    let pathbuf = std::fs::canonicalize(&recorder_path)
+    let pathbuf = std::fs::canonicalize(&path)
         .inspect_err(|_| {
-            log::warn!(
-                "Failed canonicalizing path: {recorder_path:?}, using the non-canonized instead."
-            )
+            log::warn!("Failed canonicalizing path: {path:?}, using the non-canonized instead.")
         })
-        .unwrap_or_else(|_| std::path::PathBuf::from(&recorder_path));
+        .unwrap_or_else(|_| std::path::PathBuf::from(&path));
 
     if !pathbuf.exists() {
-        log::error!("Recorder path does not exist: {pathbuf:?}");
+        log::error!("Path does not exist: {pathbuf:?}");
         std::process::exit(1);
     } else if !pathbuf.is_dir() {
-        log::error!("Recorder path is not a directory: {pathbuf:?}");
+        log::error!("Path is not a directory: {pathbuf:?}");
         std::process::exit(1);
     }
 
     pathbuf
+}
+
+pub fn recorder_path() -> std::path::PathBuf {
+    path_dir_from_arg(&args().recorder_path)
+}
+
+pub fn schema_path() -> std::path::PathBuf {
+    path_dir_from_arg(&args().schema_path)
 }
 
 /// Returns the zenoh configuration key-value pairs as a HashMap
