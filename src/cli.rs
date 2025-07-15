@@ -68,7 +68,7 @@ pub fn is_verbose() -> bool {
     args().verbose
 }
 
-pub fn path_dir_from_arg(arg: &str) -> std::path::PathBuf {
+pub fn path_dir_from_arg(arg: &str, create_if_not_exists: bool) -> std::path::PathBuf {
     let path = std::path::PathBuf::from(arg);
 
     let pathbuf = std::fs::canonicalize(&path)
@@ -78,8 +78,16 @@ pub fn path_dir_from_arg(arg: &str) -> std::path::PathBuf {
         .unwrap_or_else(|_| std::path::PathBuf::from(&path));
 
     if !pathbuf.exists() {
-        log::error!("Path does not exist: {pathbuf:?}");
-        std::process::exit(1);
+        log::warn!("Path does not exist: {pathbuf:?}");
+        if create_if_not_exists {
+            log::info!("Creating directory: {pathbuf:?}");
+            if let Err(e) = std::fs::create_dir_all(&pathbuf) {
+                log::error!("Failed to create directory: {e}");
+                std::process::exit(1);
+            }
+        } else {
+            std::process::exit(1);
+        }
     } else if !pathbuf.is_dir() {
         log::error!("Path is not a directory: {pathbuf:?}");
         std::process::exit(1);
@@ -89,14 +97,14 @@ pub fn path_dir_from_arg(arg: &str) -> std::path::PathBuf {
 }
 
 pub fn recorder_path() -> std::path::PathBuf {
-    path_dir_from_arg(&args().recorder_path)
+    path_dir_from_arg(&args().recorder_path, true)
 }
 
 pub fn schema_path() -> Option<std::path::PathBuf> {
     args()
         .schema_path
         .as_ref()
-        .map(|schema_path| path_dir_from_arg(schema_path))
+        .map(|schema_path| path_dir_from_arg(schema_path, false))
 }
 
 /// Returns the zenoh configuration key-value pairs as a HashMap
