@@ -23,9 +23,9 @@ pub struct Args {
     #[arg(long, default_value = "/tmp")]
     recorder_path: String,
 
-    /// Sets the path for message schemas.
-    #[arg(long, default_value = "src/external/zBlueberry/msgs")]
-    schema_path: String,
+    /// Sets the path for message schemas. E.g: src/external/zBlueberry/msgs
+    #[arg(long)]
+    schema_path: Option<String>,
 
     /// Zenoh configuration key-value pairs. Can be used multiple times.
     /// Format: --zkey key=value
@@ -92,8 +92,11 @@ pub fn recorder_path() -> std::path::PathBuf {
     path_dir_from_arg(&args().recorder_path)
 }
 
-pub fn schema_path() -> std::path::PathBuf {
-    path_dir_from_arg(&args().schema_path)
+pub fn schema_path() -> Option<std::path::PathBuf> {
+    args()
+        .schema_path
+        .as_ref()
+        .map(|schema_path| path_dir_from_arg(schema_path))
 }
 
 /// Returns the zenoh configuration key-value pairs as a HashMap
