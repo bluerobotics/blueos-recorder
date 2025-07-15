@@ -60,7 +60,7 @@ jobs:
   build:
     runs-on: ${{ matrix.os }}
     env:
-      BINNAME: zenoh-bmr
+      BINNAME: zenoh-recorder
     strategy:
       fail-fast: false
       matrix:
