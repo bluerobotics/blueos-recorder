@@ -68,10 +68,12 @@ pub struct Service {
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
     recorder_path: std::path::PathBuf,
-    schema_path: std::path::PathBuf,
+    schema_path: Option<std::path::PathBuf>,
 }
 
-fn load_cdr_schema(schema: &str, schema_path: &std::path::Path) -> Result<String> {
+static MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
+
+fn load_cdr_schema(schema: &str, schema_path: Option<&std::path::PathBuf>) -> Result<String> {
     let mut schema_splitted = schema.split(".");
     let schema_package = schema_splitted.next().ok_or(anyhow::anyhow!(
         "Failed to get schema package from {schema}"
@@ -79,9 +81,21 @@ fn load_cdr_schema(schema: &str, schema_path: &std::path::Path) -> Result<String
     let schema_name = schema_splitted
         .next()
         .ok_or(anyhow::anyhow!("Failed to get schema name from {schema}"))?;
-    let schema_path = schema_path.join(format!("{schema_package}/{schema_name}.msg"));
-    std::fs::read_to_string(&schema_path)
-        .map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path:?})"))
+
+    if let Some(schema_path) = schema_path {
+        let schema_path = schema_path.join(format!("{schema_package}/{schema_name}.msg"));
+        std::fs::read_to_string(&schema_path)
+            .map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path:?})"))
+    } else {
+        let schema_path = format!("{schema_package}/{schema_name}.msg");
+        let schema = MSGS_DIR.get_file(&schema_path).ok_or(anyhow::anyhow!(
+            "Failed to get schema file from {schema_path}"
+        ))?;
+        let schema = schema.contents_utf8().ok_or(anyhow::anyhow!(
+            "Failed to get schema contents from {schema_path}"
+        ))?;
+        Ok(schema.to_string())
+    }
 }
 
 fn create_schema(value: &Value) -> Value {
@@ -126,7 +140,7 @@ impl Service {
     pub async fn new(
         config: Config,
         recorder_path: std::path::PathBuf,
-        schema_path: std::path::PathBuf,
+        schema_path: Option<std::path::PathBuf>,
     ) -> Self {
         let session = zenoh::open(config)
             .await
@@ -200,7 +214,7 @@ impl Service {
                 let (encoding, schema_description, msg_encoding) =
                     match (encoding_string_0, encoding_string_1) {
                         ("application/cdr", Some(schema)) => {
-                            let schema = match load_cdr_schema(schema, &self.schema_path) {
+                            let schema = match load_cdr_schema(schema, self.schema_path.as_ref()) {
                                 Ok(schema) => schema,
                                 Err(e) => {
                                     log::error!("{topic}: Failed to load schema: {e}");
