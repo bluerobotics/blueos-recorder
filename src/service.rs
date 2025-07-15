@@ -151,6 +151,7 @@ impl Service {
     pub async fn run(&mut self) {
         let mut last_flush = SystemTime::now();
         let base_mode_regex = regex::Regex::new(r"mavlink/\d+/1/HEARTBEAT/base_mode").unwrap();
+        log::info!("Waiting for vehicle to be armed");
         while let Ok(sample) = self.subscriber.recv_async().await {
             let topic = sample.key_expr().to_string();
             let payload = sample.payload();
@@ -168,11 +169,15 @@ impl Service {
                                 // https://mavlink.io/en/messages/common.html#MAV_MODE_FLAG_SAFETY_ARMED
                                 if base_mode_value & 0b10000000 != 0 {
                                     if self.mcap.writer.is_none() {
+                                        log::info!("Vehicle is armed, starting recording");
                                         let filename = generate_filename();
                                         let path = self.recorder_path.join(filename);
                                         self.mcap = Mcap::new(std::path::Path::new(&path));
                                     }
                                 } else {
+                                    if self.mcap.writer.is_some() {
+                                        log::info!("Vehicle is disarmed, stopping recording");
+                                    }
                                     self.mcap.finish();
                                 }
                             }
