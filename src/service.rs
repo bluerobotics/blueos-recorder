@@ -176,22 +176,20 @@ impl Service {
             let encoding_string_0 = encoding_string_splitted.next().unwrap();
             let encoding_string_1 = encoding_string_splitted.next();
 
-            if base_mode_regex.is_match(&topic) {
-                if let Ok(string) = payload.try_to_string() {
-                    if string.contains("MAV_MODE_FLAG_SAFETY_ARMED") {
-                        // https://mavlink.io/en/messages/common.html#MAV_MODE_FLAG_SAFETY_ARMED
-                        if self.mcap.writer.is_none() {
-                            log::info!("Vehicle is armed, starting recording");
-                            let filename = generate_filename();
-                            let path = self.recorder_path.join(filename);
-                            self.mcap = Mcap::new(std::path::Path::new(&path));
-                        }
-                    } else {
-                        if self.mcap.writer.is_some() {
-                            log::info!("Vehicle is disarmed, stopping recording");
-                            self.mcap.finish();
-                        }
+            if base_mode_regex.is_match(&topic)
+                && let Ok(string) = payload.try_to_string()
+            {
+                if string.contains("MAV_MODE_FLAG_SAFETY_ARMED") {
+                    // https://mavlink.io/en/messages/common.html#MAV_MODE_FLAG_SAFETY_ARMED
+                    if self.mcap.writer.is_none() {
+                        log::info!("Vehicle is armed, starting recording");
+                        let filename = generate_filename();
+                        let path = self.recorder_path.join(filename);
+                        self.mcap = Mcap::new(std::path::Path::new(&path));
                     }
+                } else if self.mcap.writer.is_some() {
+                    log::info!("Vehicle is disarmed, stopping recording");
+                    self.mcap.finish();
                 }
             }
 
