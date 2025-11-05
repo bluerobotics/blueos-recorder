@@ -31,6 +31,7 @@ struct Mcap {
 
 impl Mcap {
     fn new(path: &std::path::Path) -> Self {
+        log::info!("Creating mcap file: {path:?}");
         let writer = Writer::new(BufWriter::new(
             std::fs::File::create(path).expect("Failed to create file"),
         ))
