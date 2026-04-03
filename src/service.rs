@@ -266,14 +266,17 @@ impl Service {
                 .get_mut(&topic)
                 .expect("Failed to get mcap channel");
             let now = SystemTime::now();
-            let duration = now.duration_since(UNIX_EPOCH).unwrap();
-            let timestamp = duration.as_nanos() as u64;
+            let log_time = now.duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
+            let publish_time = sample
+                .timestamp()
+                .map(|ts| ts.get_time().as_nanos())
+                .unwrap_or(log_time);
             if let Err(e) = writer.write_to_known_channel(
                 &mcap::records::MessageHeader {
                     channel_id: channel.channel_id,
                     sequence: channel.sequence,
-                    log_time: timestamp,
-                    publish_time: timestamp,
+                    log_time,
+                    publish_time,
                 },
                 &payload.to_bytes(),
             ) {
