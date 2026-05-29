@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio_graceful_shutdown::SubsystemHandle;
 use tracing::*;
@@ -6,7 +9,9 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{RAW_MAVLINK_OUT_TOPIC, vehicle::VehicleArmGate},
+    mavlink::{
+        RAW_MAVLINK_OUT_TOPIC, camera::VideoStream, vehicle::VehicleArmGate,
+    },
     mcap::Mcap,
 };
 
@@ -16,6 +21,7 @@ pub struct Service {
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
     vehicle_arm: VehicleArmGate,
+    video_streams: HashMap<String, VideoStream>,
     schema_path: Option<std::path::PathBuf>,
 }
 
@@ -62,6 +68,7 @@ impl Service {
             subscriber,
             mcap,
             vehicle_arm: VehicleArmGate::new(),
+            video_streams: HashMap::new(),
             schema_path,
         }
     }
