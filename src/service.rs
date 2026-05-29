@@ -1,15 +1,9 @@
-use std::{
-    collections::{BTreeMap, HashMap},
-    time::{SystemTime, UNIX_EPOCH},
-};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tracing::*;
 use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
-use crate::{
-    channel_descriptor::ChannelDescriptor,
-    mcap::{Channel, Mcap},
-};
+use crate::{channel_descriptor::ChannelDescriptor, mcap::Mcap};
 
 pub struct Service {
     #[allow(dead_code)]
@@ -50,10 +44,7 @@ impl Service {
         Self {
             session,
             subscriber,
-            mcap: Mcap {
-                writer: None,
-                channel: HashMap::new(),
-            },
+            mcap: Mcap::inactive(),
             recorder_path,
             schema_path,
         }
@@ -63,7 +54,7 @@ impl Service {
     pub async fn run(&mut self) {
         let mut last_flush = SystemTime::now();
         let base_mode_regex = regex::Regex::new(r"mavlink/\d+/1/HEARTBEAT/base_mode").unwrap();
-        log::info!("Waiting for vehicle to be armed");
+        info!("Waiting for vehicle to be armed");
         while let Ok(sample) = self.subscriber.recv_async().await {
             let topic = sample.key_expr().as_str();
             let encoding = sample.encoding();
@@ -76,87 +67,64 @@ impl Service {
             {
                 if string.contains("MAV_MODE_FLAG_SAFETY_ARMED") {
                     // https://mavlink.io/en/messages/common.html#MAV_MODE_FLAG_SAFETY_ARMED
-                    if self.mcap.writer.is_none() {
-                        log::info!("Vehicle is armed, starting recording");
+                    if !self.mcap.is_recording() {
+                        info!("Vehicle is armed, starting recording");
                         let filename = generate_filename();
                         let path = self.recorder_path.join(filename);
-                        self.mcap = Mcap::new(std::path::Path::new(&path));
+                        match Mcap::try_new(&path) {
+                            Ok(mcap) => self.mcap = mcap,
+                            Err(error) => {
+                                error!(%error, "Failed to start MCAP recording");
+                            }
+                        }
                     }
-                } else if self.mcap.writer.is_some() {
-                    log::info!("Vehicle is disarmed, stopping recording");
-                    self.mcap.finish();
+                } else if self.mcap.is_recording() {
+                    info!("Vehicle is disarmed, stopping recording");
+                    if let Err(error) = self.mcap.finish() {
+                        error!(%error, "Failed to stop MCAP recording");
+                    }
                 }
             }
 
-            if self.mcap.writer.is_none() {
+            if !self.mcap.is_recording() {
                 continue;
             }
-            let writer = self
-                .mcap
-                .writer
-                .as_mut()
-                .expect("Failed to get mcap writer");
 
-            if !self.mcap.channel.contains_key(&topic) {
+            let new_channel = if self.mcap.has_channel(topic) {
+                None
+            } else {
                 let Some(channel_descriptor) =
-                    ChannelDescriptor::new(&topic, encoding, payload, self.schema_path.as_ref())
+                    ChannelDescriptor::new(topic, encoding, payload, self.schema_path.as_ref())
                 else {
                     warn!("Failed creating a channel descriptor");
                     continue;
                 };
 
-                log::info!("{topic}: Adding schema: {encoding_string}");
-                log::info!("Schema description: {}", channel_descriptor.schema_content);
-                let Ok(schema_id) = writer.add_schema(
-                    &channel_descriptor.schema_name,
-                    channel_descriptor.schema_encoding.as_str(),
-                    channel_descriptor.schema_content.as_bytes(),
-                ) else {
-                    log::warn!("{topic}: Failed to add schema: {encoding_string:?}");
-                    continue;
-                };
+                info!(schema_name = %channel_descriptor.schema_name, "Adding schema");
+                Some(channel_descriptor)
+            };
 
-                let Ok(channel_id) = writer.add_channel(
-                    schema_id,
-                    &topic,
-                    channel_descriptor.message_encoding.as_str(),
-                    &BTreeMap::new(),
-                ) else {
-                    log::warn!("{topic}: Failed to add channel: {encoding_string:?}");
-                    continue;
-                };
-                self.mcap
-                    .channel
-                    .insert(topic.clone(), Channel::new(channel_id));
-            }
-
-            let channel = self
-                .mcap
-                .channel
-                .get_mut(&topic)
-                .expect("Failed to get mcap channel");
             let now = SystemTime::now();
             let log_time = now.duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
             let publish_time = sample
                 .timestamp()
                 .map(|ts| ts.get_time().as_nanos())
                 .unwrap_or(log_time);
-            if let Err(e) = writer.write_to_known_channel(
-                &mcap::records::MessageHeader {
-                    channel_id: channel.channel_id,
-                    sequence: channel.sequence,
-                    log_time,
-                    publish_time,
-                },
+            if let Err(error) = self.mcap.write_message(
+                topic,
+                log_time,
+                publish_time,
                 &payload.to_bytes(),
+                new_channel,
             ) {
-                log::error!("{topic}: Failed to write message: {e}");
+                error!(%error, "Failed to write MCAP message");
                 continue;
             }
-            channel.sequence += 1;
 
             if now.duration_since(last_flush).unwrap() > std::time::Duration::from_secs(30) {
-                self.mcap.flush();
+                if let Err(error) = self.mcap.flush() {
+                    error!(%error, "Failed to flush MCAP writer");
+                }
                 last_flush = now;
             }
         }
