@@ -1,53 +1,156 @@
-use std::{collections::HashMap, fs::File, io::BufWriter};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs::File,
+    io::BufWriter,
+};
 
+use anyhow::{Context, Result, anyhow};
 use mcap::Writer;
+use tracing::*;
+
+use crate::channel_descriptor::ChannelDescriptor;
 
 pub struct Mcap {
-    pub writer: Option<Writer<BufWriter<File>>>,
-    pub channel: HashMap<String, Channel>,
+    writer: Option<Writer<BufWriter<File>>>,
+    channel: HashMap<String, Channel>,
 }
 
 pub struct Channel {
-    pub channel_id: u16,
-    pub sequence: u32,
+    channel_id: u16,
+    sequence: u32,
 }
 
 impl Mcap {
-    pub fn new(path: &std::path::Path) -> Self {
-        log::info!("Creating mcap file: {path:?}");
-        let writer = Writer::new(BufWriter::new(
-            std::fs::File::create(path).expect("Failed to create file"),
-        ))
-        .expect("Failed to create writer");
+    pub fn inactive() -> Self {
         Self {
-            writer: Some(writer),
+            writer: None,
             channel: HashMap::new(),
         }
     }
 
-    pub fn finish(&mut self) {
-        if let Some(mut writer) = self.writer.take() {
-            writer.finish().expect("Failed to finish writer");
-        }
+    #[instrument(skip_all, fields(path = %path.display()))]
+    pub fn try_new(path: &std::path::Path) -> Result<Self> {
+        info!("Creating mcap file");
+        let file = std::fs::File::create(path).context("Failed to create MCAP file")?;
+        let writer = Writer::new(BufWriter::new(file)).context("Failed to create MCAP writer")?;
+        Ok(Self {
+            writer: Some(writer),
+            channel: HashMap::new(),
+        })
     }
 
-    pub fn flush(&mut self) {
-        if let Some(writer) = self.writer.as_mut() {
-            log::info!("Flushing writer");
-            writer.flush().expect("Failed to flush writer");
+    #[instrument(skip_all)]
+    pub fn finish(&mut self) -> Result<()> {
+        let Some(mut writer) = self.writer.take() else {
+            return Ok(());
+        };
+        writer.finish().context("Failed to finish MCAP writer")?;
+        Ok(())
+    }
+
+    #[instrument(skip_all, level = "info")]
+    pub fn flush(&mut self) -> Result<()> {
+        let Some(writer) = self.writer.as_mut() else {
+            warn!("Writer not available");
+            return Ok(()); // Nothing to flush since the writer is not available
+        };
+        writer.flush().context("Failed to flush MCAP writer")?;
+        Ok(())
+    }
+
+    #[inline]
+    pub fn is_recording(&self) -> bool {
+        self.writer.is_some()
+    }
+
+    #[inline]
+    pub fn has_channel(&self, topic: &str) -> bool {
+        self.channel.contains_key(topic)
+    }
+
+    #[instrument(skip_all)]
+    fn register_channel(&mut self, desc: ChannelDescriptor) -> Result<()> {
+        if self.channel.contains_key(&desc.topic) {
+            return Err(anyhow!("Channel already registered"));
         }
+
+        let Some(writer) = self.writer.as_mut() else {
+            return Err(anyhow!("Writer not available"));
+        };
+
+        let schema_id = writer
+            .add_schema(
+                &desc.schema_name,
+                desc.schema_encoding.as_str(),
+                desc.schema_content.as_bytes(),
+            )
+            .context("Failed to add MCAP schema")?;
+
+        let channel_id = writer
+            .add_channel(
+                schema_id,
+                &desc.topic,
+                desc.message_encoding.as_str(),
+                &BTreeMap::new(),
+            )
+            .context("Failed to add MCAP channel")?;
+
+        self.channel.insert(desc.topic, Channel::new(channel_id));
+        Ok(())
+    }
+
+    #[instrument(skip_all)]
+    pub fn write_message(
+        &mut self,
+        topic: &str,
+        log_time: u64,
+        publish_time: u64,
+        payload: &[u8],
+        new_channel: Option<ChannelDescriptor>,
+    ) -> Result<()> {
+        if let Some(desc) = new_channel {
+            if desc.topic != topic {
+                return Err(anyhow!("Channel descriptor topic mismatch: {}", desc.topic));
+            }
+            self.register_channel(desc)?;
+        }
+
+        let writer = self
+            .writer
+            .as_mut()
+            .ok_or_else(|| anyhow!("Writer not available"))?;
+
+        let channel = self
+            .channel
+            .get_mut(topic)
+            .ok_or_else(|| anyhow!("Channel not registered"))?;
+
+        let header = mcap::records::MessageHeader {
+            channel_id: channel.channel_id,
+            sequence: channel.sequence,
+            log_time,
+            publish_time,
+        };
+
+        writer
+            .write_to_known_channel(&header, payload)
+            .context("Failed to write message to MCAP channel")?;
+        channel.sequence += 1;
+        Ok(())
     }
 }
 
 impl Drop for Mcap {
     fn drop(&mut self) {
-        log::info!("Finishing writer");
-        self.finish();
+        info!("Finishing MCAP writer");
+        if let Err(error) = self.finish() {
+            error!(%error, "Failed to finish MCAP writer on drop");
+        }
     }
 }
 
 impl Channel {
-    pub fn new(channel_id: u16) -> Self {
+    fn new(channel_id: u16) -> Self {
         Self {
             channel_id,
             sequence: 0,
