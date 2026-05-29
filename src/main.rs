@@ -1,4 +1,5 @@
 mod cli;
+mod mcap;
 mod service;
 use service::Service;
 
