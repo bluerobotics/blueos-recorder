@@ -1,68 +1,14 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    fs::File,
-    io::BufWriter,
     time::{SystemTime, UNIX_EPOCH},
 };
 
 use anyhow::Result;
-use mcap::Writer;
 use serde_json::{Value, json};
 use tracing::*;
 use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
-struct Channel {
-    channel_id: u16,
-    sequence: u32,
-}
-
-impl Channel {
-    pub fn new(channel_id: u16) -> Self {
-        Self {
-            channel_id,
-            sequence: 0,
-        }
-    }
-}
-
-struct Mcap {
-    writer: Option<Writer<BufWriter<File>>>,
-    channel: HashMap<String, Channel>,
-}
-
-impl Mcap {
-    fn new(path: &std::path::Path) -> Self {
-        log::info!("Creating mcap file: {path:?}");
-        let writer = Writer::new(BufWriter::new(
-            std::fs::File::create(path).expect("Failed to create file"),
-        ))
-        .expect("Failed to create writer");
-        Self {
-            writer: Some(writer),
-            channel: HashMap::new(),
-        }
-    }
-
-    fn finish(&mut self) {
-        if let Some(mut writer) = self.writer.take() {
-            writer.finish().expect("Failed to finish writer");
-        }
-    }
-
-    fn flush(&mut self) {
-        if let Some(writer) = self.writer.as_mut() {
-            log::info!("Flushing writer");
-            writer.flush().expect("Failed to flush writer");
-        }
-    }
-}
-
-impl Drop for Mcap {
-    fn drop(&mut self) {
-        log::info!("Finishing writer");
-        self.finish();
-    }
-}
+use crate::mcap::{Channel, Mcap};
 
 pub struct Service {
     #[allow(dead_code)]
