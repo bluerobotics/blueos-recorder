@@ -1,5 +1,6 @@
 mod channel_descriptor;
 mod cli;
+mod mavlink;
 mod mcap;
 mod service;
 use service::Service;
