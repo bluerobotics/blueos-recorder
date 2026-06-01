@@ -65,12 +65,11 @@ impl Service {
         let base_mode_regex = regex::Regex::new(r"mavlink/\d+/1/HEARTBEAT/base_mode").unwrap();
         log::info!("Waiting for vehicle to be armed");
         while let Ok(sample) = self.subscriber.recv_async().await {
-            let topic = sample.key_expr().to_string();
-            let payload = sample.payload();
+            let topic = sample.key_expr().as_str();
             let encoding = sample.encoding();
+            let payload = sample.payload();
             let span = info_span!("sample", topic = %topic, encoding = %encoding);
             let _sample_span = span.enter();
-            let encoding_string = encoding.to_string();
 
             if base_mode_regex.is_match(&topic)
                 && let Ok(string) = payload.try_to_string()
