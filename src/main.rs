@@ -2,14 +2,19 @@ mod cli;
 mod service;
 use service::Service;
 
+use tracing_subscriber::EnvFilter;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     cli::init();
-    if cli::is_verbose() {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("debug")).init();
-    } else {
-        env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    }
+    let default_level = if cli::is_verbose() { "debug" } else { "info" };
+    tracing_subscriber::fmt()
+        .with_file(true)
+        .with_line_number(true)
+        .with_env_filter(
+            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(default_level)),
+        )
+        .init();
 
     let mut config = zenoh::Config::default();
     config
