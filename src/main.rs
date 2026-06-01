@@ -1,3 +1,4 @@
+mod channel_descriptor;
 mod cli;
 mod mcap;
 mod service;

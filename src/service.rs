@@ -3,12 +3,13 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use anyhow::Result;
-use serde_json::{Value, json};
 use tracing::*;
 use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
-use crate::mcap::{Channel, Mcap};
+use crate::{
+    channel_descriptor::ChannelDescriptor,
+    mcap::{Channel, Mcap},
+};
 
 pub struct Service {
     #[allow(dead_code)]
@@ -17,58 +18,6 @@ pub struct Service {
     mcap: Mcap,
     recorder_path: std::path::PathBuf,
     schema_path: Option<std::path::PathBuf>,
-}
-
-static MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
-
-fn load_cdr_schema(schema: &str, schema_path: Option<&std::path::PathBuf>) -> Result<String> {
-    let mut schema_splitted = schema.split(".");
-    let schema_package = schema_splitted.next().ok_or(anyhow::anyhow!(
-        "Failed to get schema package from {schema}"
-    ))?;
-    let schema_name = schema_splitted
-        .next()
-        .ok_or(anyhow::anyhow!("Failed to get schema name from {schema}"))?;
-
-    if let Some(schema_path) = schema_path {
-        let schema_path = schema_path.join(format!("{schema_package}/{schema_name}.msg"));
-        std::fs::read_to_string(&schema_path)
-            .map_err(|e| anyhow::anyhow!("Failed to read schema: {e}, ({schema_path:?})"))
-    } else {
-        let schema_path = format!("{schema_package}/{schema_name}.msg");
-        let schema = MSGS_DIR.get_file(&schema_path).ok_or(anyhow::anyhow!(
-            "Failed to get schema file from {schema_path}"
-        ))?;
-        let schema = schema.contents_utf8().ok_or(anyhow::anyhow!(
-            "Failed to get schema contents from {schema_path}"
-        ))?;
-        Ok(schema.to_string())
-    }
-}
-
-fn create_schema(value: &Value) -> Value {
-    match value {
-        Value::Null => json!({ "type": "null" }),
-        Value::Bool(_) => json!({ "type": "boolean" }),
-        Value::Number(n) if n.is_i64() => json!({ "type": "integer" }),
-        Value::Number(_) => json!({ "type": "number" }),
-        Value::String(_) => json!({ "type": "string" }),
-        Value::Array(arr) => {
-            let items = if let Some(first) = arr.first() {
-                create_schema(first)
-            } else {
-                json!({})
-            };
-            json!({ "type": "array", "items": items })
-        }
-        Value::Object(map) => {
-            let properties: BTreeMap<_, _> = map
-                .iter()
-                .map(|(k, v)| (k.clone(), create_schema(v)))
-                .collect();
-            json!({ "type": "object", "properties": properties })
-        }
-    }
 }
 
 fn generate_filename() -> String {
@@ -122,9 +71,6 @@ impl Service {
             let span = info_span!("sample", topic = %topic, encoding = %encoding);
             let _sample_span = span.enter();
             let encoding_string = encoding.to_string();
-            let mut encoding_string_splitted = encoding_string.split(";");
-            let encoding_string_0 = encoding_string_splitted.next().unwrap();
-            let encoding_string_1 = encoding_string_splitted.next();
 
             if base_mode_regex.is_match(&topic)
                 && let Ok(string) = payload.try_to_string()
@@ -152,56 +98,31 @@ impl Service {
                 .as_mut()
                 .expect("Failed to get mcap writer");
 
-            // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
             if !self.mcap.channel.contains_key(&topic) {
-                let (encoding, schema_description, msg_encoding) =
-                    match (encoding_string_0, encoding_string_1) {
-                        ("application/cdr", Some(schema)) => {
-                            let schema = match load_cdr_schema(schema, self.schema_path.as_ref()) {
-                                Ok(schema) => schema,
-                                Err(e) => {
-                                    log::error!("{topic}: Failed to load schema: {e}");
-                                    continue;
-                                }
-                            };
-                            ("ros2msg", schema, "cdr")
-                        }
-                        ("application/json", _) => {
-                            let Ok(string) = payload.try_to_string() else {
-                                log::warn!("{topic}: Failed to decode payload as UTF-8 string");
-                                continue;
-                            };
-                            let Ok(value) = serde_json5::from_str::<Value>(&string) else {
-                                log::warn!("{topic}: Failed to parse payload as JSON5: {string}");
-                                continue;
-                            };
-                            // Foxglove does not support non-object messages
-                            if !value.is_object() {
-                                continue;
-                            }
-                            let schema = create_schema(&value).to_string();
-                            ("jsonschema", schema, "json")
-                        }
-                        _ => {
-                            log::warn!("{topic}: Received unknown encoding: {encoding_string:?}");
-                            continue;
-                        }
-                    };
+                let Some(channel_descriptor) =
+                    ChannelDescriptor::new(&topic, encoding, payload, self.schema_path.as_ref())
+                else {
+                    warn!("Failed creating a channel descriptor");
+                    continue;
+                };
 
                 log::info!("{topic}: Adding schema: {encoding_string}");
-                log::info!("Schema description: {schema_description}");
-                let name_backup = topic.replace("/", ".").to_string();
-                let name = encoding_string_1.unwrap_or(&name_backup);
-                let Ok(schema_id) =
-                    writer.add_schema(name, encoding, schema_description.as_bytes())
-                else {
+                log::info!("Schema description: {}", channel_descriptor.schema_content);
+                let Ok(schema_id) = writer.add_schema(
+                    &channel_descriptor.schema_name,
+                    channel_descriptor.schema_encoding.as_str(),
+                    channel_descriptor.schema_content.as_bytes(),
+                ) else {
                     log::warn!("{topic}: Failed to add schema: {encoding_string:?}");
                     continue;
                 };
 
-                let Ok(channel_id) =
-                    writer.add_channel(schema_id, &topic, msg_encoding, &BTreeMap::new())
-                else {
+                let Ok(channel_id) = writer.add_channel(
+                    schema_id,
+                    &topic,
+                    channel_descriptor.message_encoding.as_str(),
+                    &BTreeMap::new(),
+                ) else {
                     log::warn!("{topic}: Failed to add channel: {encoding_string:?}");
                     continue;
                 };

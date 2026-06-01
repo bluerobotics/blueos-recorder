@@ -1,0 +1,173 @@
+use std::{collections::BTreeMap, fmt, path::PathBuf};
+
+use anyhow::Result;
+use serde_json::{Value, json};
+use tracing::*;
+
+pub struct ChannelDescriptor {
+    pub topic: String,
+    pub schema_name: String,
+    pub schema_encoding: SchemaEncoding,
+    pub schema_content: String,
+    pub message_encoding: MessageEncoding,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SchemaEncoding {
+    Ros2Msg,
+    JsonSchema,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageEncoding {
+    Cdr,
+    Json,
+}
+
+impl ChannelDescriptor {
+    #[instrument(skip_all)]
+    pub fn new(
+        topic: &str,
+        encoding: &zenoh::bytes::Encoding,
+        payload: &zenoh::bytes::ZBytes,
+        schema_path: Option<&PathBuf>,
+    ) -> Option<Self> {
+        let encoding_string = encoding.to_string();
+        let mut parts = encoding_string.split(';');
+        let mime = parts.next()?;
+        let mime_schema = parts.next();
+
+        // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
+        match (mime, mime_schema) {
+            ("application/cdr", Some(schema_name)) => {
+                let schema_content = match load_cdr_schema(schema_name, schema_path) {
+                    Ok(schema) => schema,
+                    Err(error) => {
+                        error!(%error, "Failed to load schema");
+                        return None;
+                    }
+                };
+                Some(ChannelDescriptor {
+                    topic: topic.to_owned(),
+                    schema_name: schema_name.to_owned(),
+                    schema_encoding: SchemaEncoding::Ros2Msg,
+                    schema_content,
+                    message_encoding: MessageEncoding::Cdr,
+                })
+            }
+            ("application/json", _) => {
+                let Ok(string) = payload.try_to_string() else {
+                    warn!("Failed to decode payload as UTF-8 string");
+                    return None;
+                };
+                let Ok(value) = serde_json5::from_str::<Value>(&string) else {
+                    warn!(payload = %string, "Failed to parse payload as JSON5");
+                    return None;
+                };
+                // Foxglove does not support non-object messages
+                if !value.is_object() {
+                    return None;
+                }
+                let schema_name = match mime_schema {
+                    Some(name) => name.to_owned(),
+                    None => topic.replace('/', "."),
+                };
+                let schema_content = create_schema(&value).to_string();
+                Some(ChannelDescriptor {
+                    topic: topic.to_owned(),
+                    schema_name,
+                    schema_encoding: SchemaEncoding::JsonSchema,
+                    schema_content,
+                    message_encoding: MessageEncoding::Json,
+                })
+            }
+            _ => {
+                warn!(mime_schema, "Received unknown encoding");
+                None
+            }
+        }
+    }
+}
+
+impl SchemaEncoding {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Ros2Msg => "ros2msg",
+            Self::JsonSchema => "jsonschema",
+        }
+    }
+}
+
+impl MessageEncoding {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Cdr => "cdr",
+            Self::Json => "json",
+        }
+    }
+}
+
+impl fmt::Display for SchemaEncoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl fmt::Display for MessageEncoding {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+static MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
+
+#[instrument(skip_all)]
+fn load_cdr_schema(schema: &str, schema_path: Option<&PathBuf>) -> Result<String> {
+    let mut schema_splitted = schema.split(".");
+    let schema_package = schema_splitted.next().ok_or(anyhow::anyhow!(
+        "Failed to get schema package from {schema}"
+    ))?;
+    let schema_name = schema_splitted
+        .next()
+        .ok_or(anyhow::anyhow!("Failed to get schema name from {schema}"))?;
+
+    if let Some(schema_path) = schema_path {
+        let schema_path = schema_path.join(format!("{schema_package}/{schema_name}.msg"));
+        std::fs::read_to_string(&schema_path)
+            .map_err(|error| anyhow::anyhow!("Failed to read schema: {error}, ({schema_path:?})"))
+    } else {
+        let schema_path = format!("{schema_package}/{schema_name}.msg");
+        let schema = MSGS_DIR.get_file(&schema_path).ok_or(anyhow::anyhow!(
+            "Failed to get schema file from {schema_path}"
+        ))?;
+        let schema = schema.contents_utf8().ok_or(anyhow::anyhow!(
+            "Failed to get schema contents from {schema_path}"
+        ))?;
+        Ok(schema.to_string())
+    }
+}
+
+fn create_schema(value: &Value) -> Value {
+    match value {
+        Value::Null => json!({ "type": "null" }),
+        Value::Bool(_) => json!({ "type": "boolean" }),
+        Value::Number(n) if n.is_i64() => json!({ "type": "integer" }),
+        Value::Number(_) => json!({ "type": "number" }),
+        Value::String(_) => json!({ "type": "string" }),
+        Value::Array(arr) => {
+            let items = if let Some(first) = arr.first() {
+                create_schema(first)
+            } else {
+                json!({})
+            };
+            json!({ "type": "array", "items": items })
+        }
+        Value::Object(map) => {
+            let properties: BTreeMap<_, _> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), create_schema(v)))
+                .collect();
+            json!({ "type": "object", "properties": properties })
+        }
+    }
+}
