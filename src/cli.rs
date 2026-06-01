@@ -1,6 +1,7 @@
 use clap::Parser;
 use once_cell::sync::OnceCell;
 use std::collections::HashMap;
+use tracing::*;
 
 static MANAGER: OnceCell<Manager> = OnceCell::new();
 
@@ -39,9 +40,9 @@ pub fn init() {
         .map(|arg| {
             // Fallback to the original if it fails to expand
             shellexpand::env(&arg.clone())
-                .inspect_err(|_| {
-                    log::warn!("Failed expanding arg: {arg:?}, using the non-expanded instead.")
-                })
+                .inspect_err(
+                    |_| warn!(arg = ?arg, "Failed expanding arg, using the non-expanded instead"),
+                )
                 .unwrap_or_else(|_| arg.into())
                 .into_owned()
         })
@@ -72,24 +73,24 @@ pub fn path_dir_from_arg(arg: &str, create_if_not_exists: bool) -> std::path::Pa
     let path = std::path::PathBuf::from(arg);
 
     let pathbuf = std::fs::canonicalize(&path)
-        .inspect_err(|_| {
-            log::warn!("Failed canonicalizing path: {path:?}, using the non-canonized instead.")
-        })
+        .inspect_err(
+            |_| warn!(path = ?path, "Failed canonicalizing path, using the non-canonized instead"),
+        )
         .unwrap_or_else(|_| std::path::PathBuf::from(&path));
 
     if !pathbuf.exists() {
-        log::warn!("Path does not exist: {pathbuf:?}");
+        warn!(path = ?pathbuf, "Path does not exist");
         if create_if_not_exists {
-            log::info!("Creating directory: {pathbuf:?}");
-            if let Err(e) = std::fs::create_dir_all(&pathbuf) {
-                log::error!("Failed to create directory: {e}");
+            info!(path = ?pathbuf, "Creating directory");
+            if let Err(error) = std::fs::create_dir_all(&pathbuf) {
+                error!(path = ?pathbuf, %error, "Failed to create directory");
                 std::process::exit(1);
             }
         } else {
             std::process::exit(1);
         }
     } else if !pathbuf.is_dir() {
-        log::error!("Path is not a directory: {pathbuf:?}");
+        error!(path = ?pathbuf, "Path is not a directory");
         std::process::exit(1);
     }
 
@@ -115,7 +116,7 @@ pub fn zkey_config() -> HashMap<String, String> {
         if let Some((key, value)) = zkey_arg.split_once('=') {
             config.insert(key.to_string(), value.to_string());
         } else {
-            log::warn!("Invalid zkey format: {zkey_arg}, expected KEY=VALUE format");
+            warn!(zkey = %zkey_arg, "Invalid zkey format, expected KEY=VALUE format");
         }
     }
 

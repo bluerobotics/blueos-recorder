@@ -8,6 +8,7 @@ use std::{
 use anyhow::Result;
 use mcap::Writer;
 use serde_json::{Value, json};
+use tracing::*;
 use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
 struct Channel {
@@ -163,6 +164,7 @@ impl Service {
         }
     }
 
+    #[instrument(skip_all)]
     pub async fn run(&mut self) {
         let mut last_flush = SystemTime::now();
         let base_mode_regex = regex::Regex::new(r"mavlink/\d+/1/HEARTBEAT/base_mode").unwrap();
@@ -171,6 +173,8 @@ impl Service {
             let topic = sample.key_expr().to_string();
             let payload = sample.payload();
             let encoding = sample.encoding();
+            let span = info_span!("sample", topic = %topic, encoding = %encoding);
+            let _sample_span = span.enter();
             let encoding_string = encoding.to_string();
             let mut encoding_string_splitted = encoding_string.split(";");
             let encoding_string_0 = encoding_string_splitted.next().unwrap();
