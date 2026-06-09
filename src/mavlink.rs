@@ -22,6 +22,10 @@ impl VehicleArmGate {
         }
     }
 
+    pub fn is_armed(&self) -> bool {
+        self.is_armed
+    }
+
     /// Updates arm state from a Zenoh sample. Returns `Some` only when the armed state changes.
     #[instrument(skip_all)]
     pub fn update(&mut self, topic: &str, payload: &ZBytes) -> Option<ArmState> {

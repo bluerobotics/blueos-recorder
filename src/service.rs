@@ -15,7 +15,6 @@ pub struct Service {
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
     vehicle_arm: VehicleArmGate,
-    recorder_path: std::path::PathBuf,
     schema_path: Option<std::path::PathBuf>,
 }
 
@@ -33,6 +32,7 @@ fn generate_filename() -> String {
 }
 
 impl Service {
+    #[instrument()]
     pub async fn new(
         config: Config,
         recorder_path: std::path::PathBuf,
@@ -46,12 +46,15 @@ impl Service {
             .await
             .expect("Failed to declare global zenoh subscriber");
 
+        let path = recorder_path.join(generate_filename());
+        info!("Opening recording session");
+
+        let mcap = Mcap::try_new(&path).unwrap();
         Self {
             session,
             subscriber,
-            mcap: Mcap::inactive(),
+            mcap,
             vehicle_arm: VehicleArmGate::new(),
-            recorder_path,
             schema_path,
         }
     }
@@ -68,27 +71,12 @@ impl Service {
             let _sample_span = span.enter();
 
             match self.vehicle_arm.update(topic, payload) {
-                Some(ArmState::Armed) if !self.mcap.is_recording() => {
-                    info!("Vehicle is armed, starting recording");
-                    let filename = generate_filename();
-                    let path = self.recorder_path.join(filename);
-                    match Mcap::try_new(&path) {
-                        Ok(mcap) => self.mcap = mcap,
-                        Err(error) => {
-                            error!(path = %path.display(), %error, "Failed to start MCAP recording");
-                        }
-                    }
-                }
-                Some(ArmState::Disarmed) if self.mcap.is_recording() => {
-                    info!("Vehicle is disarmed, stopping recording");
-                    if let Err(error) = self.mcap.finish() {
-                        error!(%error, "Failed to stop MCAP recording");
-                    }
-                }
+                Some(ArmState::Armed) => info!("Vehicle is armed"),
+                Some(ArmState::Disarmed) => info!("Vehicle is disarmed"),
                 _ => {}
             }
 
-            if !self.mcap.is_recording() {
+            if !self.should_record_sample(topic) {
                 continue;
             }
 
@@ -129,6 +117,14 @@ impl Service {
                 }
                 last_flush = now;
             }
+        }
+    }
+
+    fn should_record_sample(&self, topic: &str) -> bool {
+        if topic.starts_with("mavlink/") || topic.starts_with("video/") {
+            self.vehicle_arm.is_armed()
+        } else {
+            true
         }
     }
 }
