@@ -79,8 +79,8 @@ impl Service {
             };
 
             let topic = sample.key_expr().as_str();
-            let encoding = sample.encoding();
             let payload = sample.payload();
+            let encoding = sample.encoding();
             let span = info_span!("sample", topic = %topic, encoding = %encoding);
             let _sample_span = span.enter();
 
