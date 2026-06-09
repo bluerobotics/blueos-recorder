@@ -21,13 +21,6 @@ pub struct Channel {
 }
 
 impl Mcap {
-    pub fn inactive() -> Self {
-        Self {
-            writer: None,
-            channel: HashMap::new(),
-        }
-    }
-
     #[instrument(skip_all, fields(path = %path.display()))]
     pub fn try_new(path: &std::path::Path) -> Result<Self> {
         info!("Creating mcap file");
@@ -56,11 +49,6 @@ impl Mcap {
         };
         writer.flush().context("Failed to flush MCAP writer")?;
         Ok(())
-    }
-
-    #[inline]
-    pub fn is_recording(&self) -> bool {
-        self.writer.is_some()
     }
 
     #[inline]
