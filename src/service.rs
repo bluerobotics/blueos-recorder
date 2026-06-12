@@ -5,7 +5,7 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{ArmState, VehicleArmGate},
+    mavlink::vehicle::{ArmState, VehicleArmGate},
     mcap::Mcap,
 };
 
