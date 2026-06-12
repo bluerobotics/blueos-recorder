@@ -9,9 +9,7 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{
-        RAW_MAVLINK_OUT_TOPIC, camera::VideoStream, vehicle::VehicleArmGate,
-    },
+    mavlink::{RAW_MAVLINK_OUT_TOPIC, camera::VideoStream, vehicle::VehicleArmGate},
     mcap::Mcap,
 };
 
@@ -153,11 +151,12 @@ impl Service {
     }
 
     fn should_record_sample(&self, topic: &str) -> bool {
-        if topic.starts_with("mavlink/")
-            || topic.starts_with("mavlink_raw/")
-            || topic.starts_with("video/")
-        {
+        if topic.starts_with("mavlink/") || topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
             self.vehicle_arm.is_armed()
+        } else if topic.starts_with("video/") {
+            self.video_streams
+                .get(topic)
+                .is_some_and(|stream| stream.is_recording)
         } else {
             true
         }
