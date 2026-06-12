@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -9,7 +9,7 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{RAW_MAVLINK_OUT_TOPIC, camera::VideoStream, vehicle::VehicleArmGate},
+    mavlink::{self, RAW_MAVLINK_OUT_TOPIC, camera::VideoStream, vehicle::VehicleArmGate},
     mcap::Mcap,
 };
 
@@ -19,6 +19,7 @@ pub struct Service {
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
     vehicle_arm: VehicleArmGate,
+    recording_capable_cameras: HashSet<SystemAndComponent>,
     video_streams: HashMap<String, VideoStream>,
     schema_path: Option<std::path::PathBuf>,
 }
@@ -66,6 +67,7 @@ impl Service {
             subscriber,
             mcap,
             vehicle_arm: VehicleArmGate::new(),
+            recording_capable_cameras: HashSet::new(),
             video_streams: HashMap::new(),
             schema_path,
         }
@@ -98,6 +100,15 @@ impl Service {
             if topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
                 crate::mavlink::handle_mavlink_message(&payload.to_bytes(), &mut self.vehicle_arm)
                     .await;
+            }
+
+            if topic.starts_with(mavlink::RAW_MAVLINK_OUT_TOPIC) {
+                mavlink::camera::discover(
+                    topic,
+                    payload.to_bytes().as_ref(),
+                    &mut self.recording_capable_cameras,
+                    &mut self.video_streams,
+                );
             }
 
             if !self.should_record_sample(topic) {
