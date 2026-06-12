@@ -19,6 +19,12 @@ pub struct Service {
     schema_path: Option<std::path::PathBuf>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SystemAndComponent {
+    pub system_id: u8,
+    pub component_id: u8,
+}
+
 fn generate_filename() -> String {
     let now = SystemTime::now();
     let datetime = now
