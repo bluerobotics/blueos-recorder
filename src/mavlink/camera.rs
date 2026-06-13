@@ -1,15 +1,23 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Arc,
+    sync::{Arc, Mutex},
+    time::Duration,
 };
 
-use mavlink::ardupilotmega::{
-    CAMERA_INFORMATION_DATA, CameraCapFlags, MavCmd, MavMessage, VIDEO_STREAM_INFORMATION_DATA,
+use mavlink::{
+    MessageData,
+    ardupilotmega::{
+        CAMERA_INFORMATION_DATA, COMMAND_LONG_DATA, CameraCapFlags, MavCmd, MavComponent,
+        VIDEO_STREAM_INFORMATION_DATA,
+    },
 };
 use tracing::*;
 use zenoh::pubsub::Publisher;
 
-use crate::{mavlink::decode, service::SystemAndComponent};
+use super::encode_command_long;
+use crate::service::SystemAndComponent;
+
+const DISCOVERY_INTERVAL: Duration = Duration::from_secs(2);
 
 #[allow(dead_code)]
 pub struct VideoStream {
@@ -37,48 +45,180 @@ impl VideoStream {
     }
 }
 
-#[instrument(skip_all, fields(topic = %topic), level = "trace")]
-pub fn discover<R: std::io::Read>(
-    topic: &str,
-    bytes: R,
-    recording_capable: &mut HashSet<SystemAndComponent>,
-    video_streams: &mut HashMap<String, VideoStream>,
-) {
-    let (header, message) = match decode(bytes) {
-        Ok(packet) => packet,
-        Err(error) => {
-            warn!("Failed decoding mavlink raw message: {error:?}");
-            return;
+pub struct CameraDiscoverer {
+    state: Arc<Mutex<CameraDiscovererState>>,
+    publisher: Arc<Publisher<'static>>,
+}
+
+struct CameraDiscovererState {
+    cameras: HashSet<SystemAndComponent>,
+    source: SystemAndComponent,
+    sequence: u8,
+}
+
+impl CameraDiscovererState {
+    fn new() -> Self {
+        Self {
+            cameras: HashSet::new(),
+            source: SystemAndComponent {
+                system_id: 255,
+                component_id: MavComponent::MAV_COMP_ID_MISSIONPLANNER as u8,
+            },
+            sequence: 0,
         }
+    }
+
+    fn encode_discovery_requests(&mut self, camera: SystemAndComponent) -> Vec<Vec<u8>> {
+        vec![
+            encode_command_long(
+                self.source,
+                &mut self.sequence,
+                camera,
+                MavCmd::MAV_CMD_REQUEST_MESSAGE,
+                [
+                    CAMERA_INFORMATION_DATA::ID as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+            ),
+            encode_command_long(
+                self.source,
+                &mut self.sequence,
+                camera,
+                MavCmd::MAV_CMD_REQUEST_MESSAGE,
+                [
+                    VIDEO_STREAM_INFORMATION_DATA::ID as f32,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0.0,
+                ],
+            ),
+        ]
+    }
+}
+
+impl CameraDiscoverer {
+    pub fn new(publisher: Publisher<'static>) -> Self {
+        let state = Arc::new(Mutex::new(CameraDiscovererState::new()));
+        let publisher = Arc::new(publisher);
+
+        tokio::spawn({
+            let state = state.clone();
+            let publisher = publisher.clone();
+
+            async move {
+                let mut interval = tokio::time::interval(DISCOVERY_INTERVAL);
+                loop {
+                    interval.tick().await;
+
+                    let cameras = {
+                        let state = state.lock().expect("camera discoverer state poisoned");
+                        state.cameras.clone()
+                    };
+
+                    for camera in cameras {
+                        let messages = {
+                            let mut state = state.lock().expect("camera discoverer state poisoned");
+                            state.encode_discovery_requests(camera)
+                        };
+
+                        for bytes in messages {
+                            if let Err(error) = publisher.put(bytes).await {
+                                warn!(%error, ?camera, "Failed to publish MAVLink discovery command");
+                            }
+                        }
+                    }
+                }
+            }
+        });
+
+        Self { state, publisher }
+    }
+
+    pub async fn request_for_camera(&self, camera: SystemAndComponent) {
+        let messages = {
+            let mut state = self.state.lock().expect("camera discoverer state poisoned");
+            state.encode_discovery_requests(camera)
+        };
+
+        for bytes in messages {
+            if let Err(error) = self.publisher.put(bytes).await {
+                warn!(%error, ?camera, "Failed to publish MAVLink discovery command");
+            }
+        }
+    }
+}
+
+#[instrument(skip(video_streams, data, publisher))]
+#[allow(deprecated)]
+pub fn on_command_long(
+    data: &COMMAND_LONG_DATA,
+    video_streams: &mut HashMap<String, VideoStream>,
+    publisher: &Arc<Publisher<'static>>,
+) {
+    let target = SystemAndComponent {
+        system_id: data.target_system,
+        component_id: data.target_component,
     };
 
-    match message {
-        MavMessage::CAMERA_INFORMATION(data) => {
-            trace!("Message decoded: {header:?}, {data:?}");
+    let Some(stream) = video_stream_for_camera(video_streams, target) else {
+        return;
+    };
 
-            on_camera_information(
-                SystemAndComponent {
-                    system_id: header.system_id,
-                    component_id: header.component_id,
-                },
-                &data,
-                recording_capable,
-            );
-        }
-        MavMessage::VIDEO_STREAM_INFORMATION(data) => {
-            trace!("Message decoded: {header:?}, {data:?}");
+    let params = [
+        data.param1,
+        data.param2,
+        data.param3,
+        data.param4,
+        data.param5,
+        data.param6,
+        data.param7,
+    ];
 
-            on_video_stream_information(
-                SystemAndComponent {
-                    system_id: header.system_id,
-                    component_id: header.component_id,
-                },
-                &data,
-                recording_capable,
-                video_streams,
-            );
+    match data.command {
+        MavCmd::MAV_CMD_VIDEO_START_CAPTURE
+        | MavCmd::MAV_CMD_VIDEO_STOP_CAPTURE
+        | MavCmd::MAV_CMD_REQUEST_CAMERA_CAPTURE_STATUS => {
+            stream.handle_command(data.command, params, publisher);
         }
         _ => {}
+    }
+}
+
+fn video_stream_for_camera(
+    video_streams: &mut HashMap<String, VideoStream>,
+    camera: SystemAndComponent,
+) -> Option<&mut VideoStream> {
+    video_streams
+        .values_mut()
+        .find(|stream| stream.camera == camera)
+}
+
+#[instrument(skip(discoverer))]
+pub(crate) fn on_heartbeat(
+    discoverer: &CameraDiscoverer,
+    camera: SystemAndComponent,
+) -> Option<SystemAndComponent> {
+    let newly_discovered = {
+        let mut state = discoverer
+            .state
+            .lock()
+            .expect("camera discoverer state poisoned");
+        state.cameras.insert(camera)
+    };
+
+    if newly_discovered {
+        info!("Discovered camera component");
+        Some(camera)
+    } else {
+        None
     }
 }
 
