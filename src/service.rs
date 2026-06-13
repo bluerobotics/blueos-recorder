@@ -125,7 +125,7 @@ impl Service {
                     continue;
                 };
 
-                info!(schema_name = %channel_descriptor.schema_name, "Adding schema");
+                info!("Adding channel");
                 Some(channel_descriptor)
             };
 
