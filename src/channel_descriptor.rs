@@ -3,6 +3,7 @@ use std::{borrow::Cow, collections::BTreeMap, fmt, path::PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 use tracing::*;
+use zenoh::bytes::{Encoding, ZBytes};
 
 pub struct ChannelDescriptor {
     pub topic: String,
@@ -32,18 +33,29 @@ impl ChannelDescriptor {
     #[instrument(skip_all)]
     pub fn new(
         topic: &str,
-        encoding: &zenoh::bytes::Encoding,
-        payload: &zenoh::bytes::ZBytes,
+        encoding: &Encoding,
+        payload: &ZBytes,
         schema_path: Option<&PathBuf>,
     ) -> Option<Self> {
         let encoding = Cow::from(encoding);
-        let mut parts = encoding.split(';');
-        let mime = parts.next()?;
-        let mime_schema = parts.next();
+        let (encoding, schema) = {
+            let mut encoding_split = encoding.split(';');
+            let Some(encoding) = encoding_split.next() else {
+                warn!("No encoding string");
+                return None;
+            };
+            let schema = encoding_split.next();
+
+            (encoding, schema)
+        };
+
+        let cdr = Cow::from(Encoding::APPLICATION_CDR);
+        let json = Cow::from(Encoding::APPLICATION_JSON);
+        let octet = Cow::from(Encoding::APPLICATION_OCTET_STREAM);
 
         // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
-        match (mime, mime_schema) {
-            ("application/cdr", Some(schema_name)) => {
+        match (encoding, schema) {
+            (encoding, Some(schema_name)) if encoding == cdr => {
                 let schema_content = match load_cdr_schema(schema_name, schema_path) {
                     Ok(schema) => schema,
                     Err(error) => {
@@ -51,7 +63,7 @@ impl ChannelDescriptor {
                         return None;
                     }
                 };
-                Some(ChannelDescriptor {
+                Some(Self {
                     topic: topic.to_owned(),
                     schema: Some(SchemaDescriptor {
                         name: schema_name.to_owned(),
@@ -61,7 +73,7 @@ impl ChannelDescriptor {
                     message_encoding: MessageEncoding::Cdr,
                 })
             }
-            ("application/json", _) => {
+            (encoding, schema) if encoding == json => {
                 let Ok(string) = payload.try_to_string() else {
                     warn!("Failed to decode payload as UTF-8 string");
                     return None;
@@ -74,12 +86,12 @@ impl ChannelDescriptor {
                 if !value.is_object() {
                     return None;
                 }
-                let schema_name = match mime_schema {
+                let schema_name = match schema {
                     Some(name) => name.to_owned(),
                     None => topic.replace('/', "."),
                 };
                 let schema_content = create_schema(&value).to_string();
-                Some(ChannelDescriptor {
+                Some(Self {
                     topic: topic.to_owned(),
                     schema: Some(SchemaDescriptor {
                         name: schema_name,
@@ -90,7 +102,7 @@ impl ChannelDescriptor {
                 })
             }
             _ => {
-                warn!(mime_schema, "Received unknown encoding");
+                warn!(encoding = %encoding, "Received unknown encoding");
                 None
             }
         }
