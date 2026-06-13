@@ -146,7 +146,7 @@ impl fmt::Display for MessageEncoding {
     }
 }
 
-static MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
+const MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
 
 #[instrument(skip_all)]
 fn load_cdr_schema(schema: &str, schema_path: Option<&PathBuf>) -> Result<String> {
