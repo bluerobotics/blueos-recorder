@@ -27,6 +27,7 @@ pub enum SchemaEncoding {
 pub enum MessageEncoding {
     Cdr,
     Json,
+    OctetStream,
 }
 
 impl ChannelDescriptor {
@@ -101,6 +102,11 @@ impl ChannelDescriptor {
                     message_encoding: MessageEncoding::Json,
                 })
             }
+            (encoding, _schema) if encoding == octet => Some(Self {
+                topic: topic.to_owned(),
+                schema: None,
+                message_encoding: MessageEncoding::OctetStream,
+            }),
             _ => {
                 warn!(encoding = %encoding, "Received unknown encoding");
                 None
@@ -123,6 +129,7 @@ impl MessageEncoding {
         match self {
             Self::Cdr => "cdr",
             Self::Json => "json",
+            Self::OctetStream => "application/octet-stream",
         }
     }
 }
