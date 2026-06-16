@@ -25,7 +25,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: check
-          args: --all-features
+          args: --locked --all-features
 
   fmt:
     name: Rustfmt
@@ -61,7 +61,7 @@ jobs:
       - uses: actions-rs/cargo@v1
         with:
           command: clippy
-          args: -- -D warnings
+          args: --locked -- -D warnings
 
   build:
     runs-on: ${{ matrix.os }}
@@ -109,7 +109,7 @@ jobs:
       with:
         command: build
         target: ${{ matrix.TARGET }}
-        args: "--verbose --release "
+        args: "--locked --verbose --release"
         strip: true
 
     - name: Rename
