@@ -1,62 +1,43 @@
+use mavlink::ardupilotmega::{HEARTBEAT_DATA, MavModeFlag};
 use tracing::*;
-use zenoh::bytes::ZBytes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArmState {
-    NotApplicable,
     Armed,
     Disarmed,
 }
 
 pub struct VehicleArmGate {
     is_armed: bool,
-    base_mode_regex: regex::Regex,
 }
 
 impl VehicleArmGate {
     pub fn new() -> Self {
-        Self {
-            is_armed: false,
-            base_mode_regex: regex::Regex::new(r"mavlink/\d+/1/HEARTBEAT/base_mode")
-                .expect("valid heartbeat base_mode regex"),
-        }
+        Self { is_armed: false }
     }
 
     pub fn is_armed(&self) -> bool {
         self.is_armed
     }
+}
 
-    /// Updates arm state from a Zenoh sample. Returns `Some` only when the armed state changes.
-    #[instrument(skip_all)]
-    pub fn update(&mut self, topic: &str, payload: &ZBytes) -> Option<ArmState> {
-        match self.check(topic, payload) {
-            ArmState::Armed if !self.is_armed => {
-                self.is_armed = true;
-                Some(ArmState::Armed)
-            }
-            ArmState::Disarmed if self.is_armed => {
-                self.is_armed = false;
-                Some(ArmState::Disarmed)
-            }
-            _ => None,
+#[instrument(skip(gate, data))]
+pub(crate) fn on_heartbeat(gate: &mut VehicleArmGate, data: &HEARTBEAT_DATA) -> Option<ArmState> {
+    let armed = data
+        .base_mode
+        .contains(MavModeFlag::MAV_MODE_FLAG_SAFETY_ARMED);
+
+    match (armed, gate.is_armed) {
+        (true, false) => {
+            info!("Vehicle changed to armed");
+            gate.is_armed = true;
+            Some(ArmState::Armed)
         }
-    }
-
-    #[instrument(skip_all, level = "trace")]
-    fn check(&self, topic: &str, payload: &ZBytes) -> ArmState {
-        if !self.base_mode_regex.is_match(topic) {
-            return ArmState::NotApplicable;
+        (false, true) => {
+            info!("Vehicle changed to disarmed");
+            gate.is_armed = false;
+            Some(ArmState::Disarmed)
         }
-
-        let Ok(payload) = payload.try_to_string() else {
-            return ArmState::NotApplicable;
-        };
-
-        if payload.contains("MAV_MODE_FLAG_SAFETY_ARMED") {
-            // https://mavlink.io/en/messages/common.html#MAV_MODE_FLAG_SAFETY_ARMED
-            ArmState::Armed
-        } else {
-            ArmState::Disarmed
-        }
+        _ => None,
     }
 }

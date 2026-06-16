@@ -5,7 +5,7 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::vehicle::{ArmState, VehicleArmGate},
+    mavlink::{RAW_MAVLINK_OUT_TOPIC, vehicle::VehicleArmGate},
     mcap::Mcap,
 };
 
@@ -70,10 +70,9 @@ impl Service {
             let span = info_span!("sample", topic = %topic, encoding = %encoding);
             let _sample_span = span.enter();
 
-            match self.vehicle_arm.update(topic, payload) {
-                Some(ArmState::Armed) => info!("Vehicle is armed"),
-                Some(ArmState::Disarmed) => info!("Vehicle is disarmed"),
-                _ => {}
+            if topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
+                crate::mavlink::handle_mavlink_message(&payload.to_bytes(), &mut self.vehicle_arm)
+                    .await;
             }
 
             if !self.should_record_sample(topic) {
@@ -121,7 +120,10 @@ impl Service {
     }
 
     fn should_record_sample(&self, topic: &str) -> bool {
-        if topic.starts_with("mavlink/") || topic.starts_with("video/") {
+        if topic.starts_with("mavlink/")
+            || topic.starts_with("mavlink_raw/")
+            || topic.starts_with("video/")
+        {
             self.vehicle_arm.is_armed()
         } else {
             true
