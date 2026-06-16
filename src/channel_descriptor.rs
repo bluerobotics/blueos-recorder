@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, fmt, path::PathBuf};
+use std::{borrow::Cow, collections::BTreeMap, fmt, path::PathBuf};
 
 use anyhow::Result;
 use serde_json::{Value, json};
@@ -32,8 +32,8 @@ impl ChannelDescriptor {
         payload: &zenoh::bytes::ZBytes,
         schema_path: Option<&PathBuf>,
     ) -> Option<Self> {
-        let encoding_string = encoding.to_string();
-        let mut parts = encoding_string.split(';');
+        let encoding = Cow::from(encoding);
+        let mut parts = encoding.split(';');
         let mime = parts.next()?;
         let mime_schema = parts.next();
 
