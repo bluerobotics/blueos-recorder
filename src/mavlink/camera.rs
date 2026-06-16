@@ -105,9 +105,8 @@ impl CameraDiscovererState {
 }
 
 impl CameraDiscoverer {
-    pub fn new(publisher: Publisher<'static>) -> Self {
+    pub fn new(publisher: Arc<Publisher<'static>>) -> Self {
         let state = Arc::new(Mutex::new(CameraDiscovererState::new()));
-        let publisher = Arc::new(publisher);
 
         tokio::spawn({
             let state = state.clone();
