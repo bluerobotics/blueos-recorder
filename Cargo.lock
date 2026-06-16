@@ -326,7 +326,6 @@ dependencies = [
  "mavlink",
  "mcap 0.25.0",
  "once_cell",
- "regex",
  "serde_json",
  "serde_json5",
  "shellexpand",
