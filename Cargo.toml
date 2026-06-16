@@ -18,4 +18,4 @@ shellexpand = "3.1.0"
 tokio = "1.46.0"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
-zenoh = { version = "=1.9.0", features = ["internal", "shared-memory"] }
+zenoh = { version = "=1.9.0", features = ["shared-memory"] }
