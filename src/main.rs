@@ -5,6 +5,7 @@ mod mcap;
 mod service;
 use service::Service;
 
+use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle, Toplevel};
 use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
@@ -19,6 +20,16 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
 
+    Toplevel::new(async |subsystem: &mut SubsystemHandle| {
+        subsystem.start(SubsystemBuilder::new("Recorder", recorder));
+    })
+    .catch_signals()
+    .handle_shutdown_requests(std::time::Duration::from_secs(30))
+    .await
+    .map_err(Into::into)
+}
+
+async fn recorder(subsystem: &mut SubsystemHandle) -> anyhow::Result<()> {
     let mut config = zenoh::Config::default();
     config
         .insert_json5("mode", r#""client""#)
@@ -45,7 +56,7 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let mut service = Service::new(config, cli::recorder_path(), cli::schema_path()).await;
-    service.run().await;
+    service.run(subsystem).await?;
 
     Ok(())
 }
