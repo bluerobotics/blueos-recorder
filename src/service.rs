@@ -1,5 +1,6 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tokio_graceful_shutdown::SubsystemHandle;
 use tracing::*;
 use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
@@ -60,10 +61,23 @@ impl Service {
     }
 
     #[instrument(skip_all)]
-    pub async fn run(&mut self) {
+    pub async fn run(&mut self, subsystem: &mut SubsystemHandle) -> anyhow::Result<()> {
         let mut last_flush = SystemTime::now();
         info!("Waiting for vehicle to be armed");
-        while let Ok(sample) = self.subscriber.recv_async().await {
+        loop {
+            let sample = tokio::select! {
+                sample = self.subscriber.recv_async() => {
+                    let Ok(sample) = sample else {
+                        break;
+                    };
+
+                    sample
+                },
+                () = subsystem.on_shutdown_requested() => {
+                    break;
+                },
+            };
+
             let topic = sample.key_expr().as_str();
             let encoding = sample.encoding();
             let payload = sample.payload();
@@ -117,6 +131,8 @@ impl Service {
                 last_flush = now;
             }
         }
+
+        Ok(())
     }
 
     fn should_record_sample(&self, topic: &str) -> bool {
