@@ -133,6 +133,10 @@ impl Service {
             }
         }
 
+        if let Err(error) = self.mcap.finish() {
+            error!(%error, "Failed to finish MCAP writer");
+        }
+
         Ok(())
     }
 
