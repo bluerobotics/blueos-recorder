@@ -3,13 +3,18 @@ use std::{borrow::Cow, collections::BTreeMap, fmt, path::PathBuf};
 use anyhow::Result;
 use serde_json::{Value, json};
 use tracing::*;
+use zenoh::bytes::{Encoding, ZBytes};
 
 pub struct ChannelDescriptor {
     pub topic: String,
-    pub schema_name: String,
-    pub schema_encoding: SchemaEncoding,
-    pub schema_content: String,
+    pub schema: Option<SchemaDescriptor>,
     pub message_encoding: MessageEncoding,
+}
+
+pub struct SchemaDescriptor {
+    pub name: String,
+    pub encoding: SchemaEncoding,
+    pub content: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,24 +27,32 @@ pub enum SchemaEncoding {
 pub enum MessageEncoding {
     Cdr,
     Json,
+    OctetStream,
 }
 
 impl ChannelDescriptor {
     #[instrument(skip_all)]
     pub fn new(
         topic: &str,
-        encoding: &zenoh::bytes::Encoding,
-        payload: &zenoh::bytes::ZBytes,
+        encoding: &Encoding,
+        payload: &ZBytes,
         schema_path: Option<&PathBuf>,
     ) -> Option<Self> {
         let encoding = Cow::from(encoding);
-        let mut parts = encoding.split(';');
-        let mime = parts.next()?;
-        let mime_schema = parts.next();
+        let (encoding, schema) = {
+            let mut encoding_split = encoding.split(';');
+            let Some(encoding) = encoding_split.next() else {
+                warn!("No encoding string");
+                return None;
+            };
+            let schema = encoding_split.next();
+
+            (encoding, schema)
+        };
 
         // For more information: https://mcap.dev/spec/registry#well-known-schema-encodings
-        match (mime, mime_schema) {
-            ("application/cdr", Some(schema_name)) => {
+        match (encoding, schema) {
+            (encoding, Some(schema_name)) if encoding == Cow::from(Encoding::APPLICATION_CDR) => {
                 let schema_content = match load_cdr_schema(schema_name, schema_path) {
                     Ok(schema) => schema,
                     Err(error) => {
@@ -47,15 +60,17 @@ impl ChannelDescriptor {
                         return None;
                     }
                 };
-                Some(ChannelDescriptor {
+                Some(Self {
                     topic: topic.to_owned(),
-                    schema_name: schema_name.to_owned(),
-                    schema_encoding: SchemaEncoding::Ros2Msg,
-                    schema_content,
+                    schema: Some(SchemaDescriptor {
+                        name: schema_name.to_owned(),
+                        encoding: SchemaEncoding::Ros2Msg,
+                        content: schema_content,
+                    }),
                     message_encoding: MessageEncoding::Cdr,
                 })
             }
-            ("application/json", _) => {
+            (encoding, schema) if encoding == Cow::from(Encoding::APPLICATION_JSON) => {
                 let Ok(string) = payload.try_to_string() else {
                     warn!("Failed to decode payload as UTF-8 string");
                     return None;
@@ -68,21 +83,30 @@ impl ChannelDescriptor {
                 if !value.is_object() {
                     return None;
                 }
-                let schema_name = match mime_schema {
+                let schema_name = match schema {
                     Some(name) => name.to_owned(),
                     None => topic.replace('/', "."),
                 };
                 let schema_content = create_schema(&value).to_string();
-                Some(ChannelDescriptor {
+                Some(Self {
                     topic: topic.to_owned(),
-                    schema_name,
-                    schema_encoding: SchemaEncoding::JsonSchema,
-                    schema_content,
+                    schema: Some(SchemaDescriptor {
+                        name: schema_name,
+                        encoding: SchemaEncoding::JsonSchema,
+                        content: schema_content,
+                    }),
                     message_encoding: MessageEncoding::Json,
                 })
             }
+            (encoding, _schema) if encoding == Cow::from(Encoding::APPLICATION_OCTET_STREAM) => {
+                Some(Self {
+                    topic: topic.to_owned(),
+                    schema: None,
+                    message_encoding: MessageEncoding::OctetStream,
+                })
+            }
             _ => {
-                warn!(mime_schema, "Received unknown encoding");
+                warn!(encoding = %encoding, "Received unknown encoding");
                 None
             }
         }
@@ -103,6 +127,7 @@ impl MessageEncoding {
         match self {
             Self::Cdr => "cdr",
             Self::Json => "json",
+            Self::OctetStream => "application/octet-stream",
         }
     }
 }
@@ -119,7 +144,7 @@ impl fmt::Display for MessageEncoding {
     }
 }
 
-static MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
+const MSGS_DIR: include_dir::Dir = include_dir::include_dir!("src/external/zBlueberry/msgs");
 
 #[instrument(skip_all)]
 fn load_cdr_schema(schema: &str, schema_path: Option<&PathBuf>) -> Result<String> {
