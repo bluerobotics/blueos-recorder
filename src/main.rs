@@ -3,6 +3,8 @@ mod cli;
 mod mavlink;
 mod mcap;
 mod service;
+mod zenoh_config;
+mod zenoh_subscriptions;
 use service::Service;
 
 use tokio_graceful_shutdown::{SubsystemBuilder, SubsystemHandle, Toplevel};
@@ -44,18 +46,28 @@ async fn recorder(subsystem: &mut SubsystemHandle) -> anyhow::Result<()> {
         .insert_json5("metadata", r#"{"name": "blueos-recorder"}"#)
         .expect("Failed to insert metadata");
 
+    zenoh_config::apply_recorder_defaults(&mut config);
+
     for (key, value) in cli::zkey_config() {
-        config
-            .insert_json5(
-                &key,
-                &serde_json5::to_string(&value).unwrap_or_else(|error| {
-                    panic!("Failed to convert key value to json {key}: {error}")
-                }),
-            )
-            .unwrap_or_else(|error| panic!("Failed to insert {key}: {error}"));
+        if config.insert_json5(&key, &value).is_err() {
+            config
+                .insert_json5(
+                    &key,
+                    &serde_json5::to_string(&value).unwrap_or_else(|error| {
+                        panic!("Failed to convert key value to json {key}: {error}")
+                    }),
+                )
+                .unwrap_or_else(|error| panic!("Failed to insert {key}: {error}"));
+        }
     }
 
-    let mut service = Service::new(config, cli::recorder_path(), cli::schema_path()).await;
+    let mut service = Service::new(
+        config,
+        cli::recorder_path(),
+        cli::schema_path(),
+        cli::mcap_write_config(),
+    )
+    .await;
     service.run(subsystem).await?;
 
     Ok(())

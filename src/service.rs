@@ -1,38 +1,32 @@
 use std::{
-    collections::{HashMap, HashSet},
-    sync::Arc,
-    time::{SystemTime, UNIX_EPOCH},
+    borrow::Cow,
+    collections::HashSet,
+    path::PathBuf,
+    sync::{Arc, Mutex},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
+use bytes::Bytes;
 use tokio_graceful_shutdown::SubsystemHandle;
 use tracing::*;
-use zenoh::{
-    Config, Session, handlers::FifoChannelHandler, pubsub::Publisher, pubsub::Subscriber,
-    sample::Sample,
-};
+use zenoh::{Config, Session, pubsub::Publisher, sample::Sample};
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{
-        self, RAW_MAVLINK_OUT_TOPIC,
-        camera::{CameraDiscoverer, VideoStream},
-        vehicle::VehicleArmGate,
-    },
-    mcap::Mcap,
+    mavlink::{self, RAW_MAVLINK_OUT_TOPIC, frame::FrameDecoder, worker::MavlinkWorker},
+    mcap::{Mcap, McapWriteConfig, McapWriter},
+    zenoh_subscriptions::{self, SubscriberRegistry},
 };
+
+const FLUSH_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
 pub struct Service {
     #[allow(dead_code)]
     session: Session,
     #[allow(dead_code)]
     mavlink_publisher: Arc<Publisher<'static>>,
-    subscriber: Subscriber<FifoChannelHandler<Sample>>,
+    subscribers: Option<SubscriberRegistry>,
     mcap: Mcap,
-    vehicle_arm: VehicleArmGate,
-    camera_discoverer: CameraDiscoverer,
-    recording_capable_cameras: HashSet<SystemAndComponent>,
-    video_streams: HashMap<String, VideoStream>,
-    schema_path: Option<std::path::PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -58,16 +52,13 @@ impl Service {
     #[instrument()]
     pub async fn new(
         config: Config,
-        recorder_path: std::path::PathBuf,
-        schema_path: Option<std::path::PathBuf>,
+        recorder_path: PathBuf,
+        schema_path: Option<PathBuf>,
+        mcap_config: McapWriteConfig,
     ) -> Self {
         let session = zenoh::open(config)
             .await
             .expect("Failed to open zenoh session");
-        let subscriber = session
-            .declare_subscriber("**")
-            .await
-            .expect("Failed to declare global zenoh subscriber");
         let mavlink_publisher = Arc::new(
             session
                 .declare_publisher(mavlink::RAW_MAVLINK_IN_TOPIC)
@@ -81,113 +72,174 @@ impl Service {
         let path = recorder_path.join(generate_filename());
         info!("Opening recording session");
 
-        let mcap = Mcap::try_new(&path).unwrap();
+        let mcap = Mcap::try_new(&path, mcap_config)
+            .await
+            .expect("Failed to open MCAP file");
+        let mavlink_worker = MavlinkWorker::new(mavlink_publisher.clone());
+
+        let processor = Arc::new(SampleProcessor {
+            mcap: mcap.writer(),
+            mavlink_worker,
+            decoder: Mutex::new(FrameDecoder::default()),
+            video_gate_skip_logged: Mutex::new(HashSet::new()),
+            schema_path,
+        });
+
+        let subscribe_patterns = crate::cli::zenoh_subscribe_patterns();
+        let subscribers = zenoh_subscriptions::open_callback_subscribers(
+            &session,
+            &subscribe_patterns,
+            processor,
+        )
+        .await;
+
         Self {
             session,
-            mavlink_publisher: mavlink_publisher.clone(),
-            subscriber,
+            mavlink_publisher,
+            subscribers: Some(subscribers),
             mcap,
-            vehicle_arm: VehicleArmGate::new(),
-            camera_discoverer: CameraDiscoverer::new(mavlink_publisher),
-            recording_capable_cameras: HashSet::new(),
-            video_streams: HashMap::new(),
-            schema_path,
         }
     }
 
     #[instrument(skip_all)]
     pub async fn run(&mut self, subsystem: &mut SubsystemHandle) -> anyhow::Result<()> {
-        let mut last_flush = SystemTime::now();
         info!("Waiting for vehicle to be armed");
-        loop {
-            let sample = tokio::select! {
-                sample = self.subscriber.recv_async() => {
-                    let Ok(sample) = sample else {
-                        break;
-                    };
+        let mut flush_ticker = tokio::time::interval(FLUSH_POLL_INTERVAL);
+        flush_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
-                    sample
-                },
+        loop {
+            tokio::select! {
+                _ = flush_ticker.tick() => {
+                    if let Err(error) = self.mcap.maybe_flush().await {
+                        error!(%error, "Failed to flush MCAP writer");
+                    }
+                }
                 () = subsystem.on_shutdown_requested() => {
                     break;
-                },
-            };
-
-            let topic = sample.key_expr().as_str();
-            let payload = sample.payload();
-            let encoding = sample.encoding();
-            let span = info_span!("sample", topic = %topic, encoding = %encoding);
-            let _sample_span = span.enter();
-
-            if topic.starts_with(mavlink::RAW_MAVLINK_OUT_TOPIC) {
-                mavlink::handle_mavlink_message(
-                    payload.to_bytes().as_ref(),
-                    &mut self.vehicle_arm,
-                    &self.camera_discoverer,
-                    &mut self.recording_capable_cameras,
-                    &mut self.video_streams,
-                    &self.mavlink_publisher,
-                )
-                .await;
-            }
-
-            if !self.should_record_sample(topic) {
-                continue;
-            }
-
-            let new_channel = if self.mcap.has_channel(topic) {
-                None
-            } else {
-                let Some(channel_descriptor) =
-                    ChannelDescriptor::new(topic, encoding, payload, self.schema_path.as_ref())
-                else {
-                    warn!("Failed creating a channel descriptor");
-                    continue;
-                };
-
-                info!("Adding channel");
-                Some(channel_descriptor)
-            };
-
-            let now = SystemTime::now();
-            let log_time = now.duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
-            let publish_time = sample
-                .timestamp()
-                .map(|ts| ts.get_time().as_nanos())
-                .unwrap_or(log_time);
-            if let Err(error) = self.mcap.write_message(
-                topic,
-                log_time,
-                publish_time,
-                &payload.to_bytes(),
-                new_channel,
-            ) {
-                error!(%error, "Failed to write MCAP message");
-                continue;
-            }
-
-            if now.duration_since(last_flush).unwrap() > std::time::Duration::from_secs(30) {
-                if let Err(error) = self.mcap.flush() {
-                    error!(%error, "Failed to flush MCAP writer");
                 }
-                last_flush = now;
             }
         }
 
-        if let Err(error) = self.mcap.finish() {
+        // Drop subscribers first so no more callbacks fire while we finalize.
+        self.subscribers.take();
+
+        if let Err(error) = self.mcap.finish().await {
             error!(%error, "Failed to finish MCAP writer");
         }
 
         Ok(())
     }
+}
+
+pub struct SampleProcessor {
+    mcap: Arc<McapWriter>,
+    mavlink_worker: MavlinkWorker,
+    decoder: Mutex<FrameDecoder>,
+    video_gate_skip_logged: Mutex<HashSet<String>>,
+    schema_path: Option<PathBuf>,
+}
+
+impl SampleProcessor {
+    pub fn handle(&self, sample: Sample) {
+        let topic = sample.key_expr().as_str();
+
+        if topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
+            self.process_raw_mavlink(topic, &sample);
+            return;
+        }
+
+        if !self.should_record_sample(topic) {
+            return;
+        }
+
+        let payload = sample.payload().to_bytes();
+        let payload = match payload {
+            Cow::Borrowed(bytes) => Bytes::copy_from_slice(bytes),
+            Cow::Owned(bytes) => Bytes::from(bytes),
+        };
+        self.write_recording(topic, &sample, payload);
+    }
+
+    fn process_raw_mavlink(&self, topic: &str, sample: &Sample) {
+        let payload = sample.payload().to_bytes();
+        let mut decoder = self.decoder.lock().expect("mavlink decoder poisoned");
+        let Some(packet) = decoder.decode(payload.as_ref()) else {
+            return;
+        };
+
+        if self.mavlink_worker.is_armed() {
+            let wire = packet.bytes().clone();
+            self.mavlink_worker.try_enqueue(packet);
+            drop(decoder);
+            self.write_recording(topic, sample, wire);
+        } else if mavlink::frame::needed_while_disarmed(packet.message_id()) {
+            self.mavlink_worker.try_enqueue(packet);
+        }
+    }
+
+    fn write_recording(&self, topic: &str, sample: &Sample, payload: Bytes) {
+        let publish_time = sample
+            .timestamp()
+            .map(|ts| ts.get_time().as_nanos())
+            .unwrap_or_else(|| {
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .expect("Time went backwards")
+                    .as_nanos() as u64
+            });
+
+        if let Err(error) =
+            self.mcap
+                .write_message(topic, publish_time, publish_time, payload, || {
+                    ChannelDescriptor::new(
+                        topic,
+                        sample.encoding(),
+                        sample.payload(),
+                        self.schema_path.as_ref(),
+                    )
+                })
+        {
+            error!(%error, "Failed to write MCAP message");
+        }
+    }
 
     fn should_record_sample(&self, topic: &str) -> bool {
-        if topic.starts_with("mavlink/") || topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
-            self.vehicle_arm.is_armed()
+        if topic.starts_with("mavlink/") {
+            if self.mavlink_worker.is_armed() {
+                true
+            } else {
+                trace!("Skipping MAVLink sample: vehicle disarmed");
+                false
+            }
         } else if topic.starts_with("video/") {
-            self.video_streams
-                .get(topic)
-                .is_some_and(|stream| stream.is_recording)
+            let gate = self.mavlink_worker.video_recording_gate();
+            if gate.is_recording(topic) {
+                self.video_gate_skip_logged
+                    .lock()
+                    .expect("video gate skip log poisoned")
+                    .remove(topic);
+                true
+            } else if gate.is_registered(topic) {
+                if self
+                    .video_gate_skip_logged
+                    .lock()
+                    .expect("video gate skip log poisoned")
+                    .insert(format!("idle:{topic}"))
+                {
+                    debug!("Skipping video sample: stream registered but not recording");
+                }
+                false
+            } else if self
+                .video_gate_skip_logged
+                .lock()
+                .expect("video gate skip log poisoned")
+                .insert(format!("unknown:{topic}"))
+            {
+                debug!("Skipping video sample: topic not registered");
+                false
+            } else {
+                false
+            }
         } else {
             true
         }
