@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.98"
+bytes = "1.11"
 chrono = "0.4.41"
 clap = { version = "4.5.41", features = ["derive"] }
 foxglove = "0.25.1"
