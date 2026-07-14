@@ -1,4 +1,8 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::HashSet,
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use bytes::Bytes;
 use tokio_graceful_shutdown::SubsystemHandle;
@@ -7,7 +11,9 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{RAW_MAVLINK_OUT_TOPIC, vehicle::VehicleArmGate},
+    mavlink::{
+        self, RAW_MAVLINK_OUT_TOPIC, camera::discoverer::CameraDiscoverer, vehicle::VehicleArmGate,
+    },
     mcap::{Mcap, McapWriteConfig},
 };
 
@@ -17,7 +23,15 @@ pub struct Service {
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
     vehicle_arm: VehicleArmGate,
+    camera_discoverer: CameraDiscoverer,
+    recording_capable_cameras: HashSet<SystemAndComponent>,
     schema_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SystemAndComponent {
+    pub system_id: u8,
+    pub component_id: u8,
 }
 
 fn generate_filename() -> String {
@@ -48,6 +62,15 @@ impl Service {
             .declare_subscriber("**")
             .await
             .expect("Failed to declare global zenoh subscriber");
+        let mavlink_publisher = Arc::new(
+            session
+                .declare_publisher(mavlink::RAW_MAVLINK_IN_TOPIC)
+                .encoding(zenoh::bytes::Encoding::APPLICATION_OCTET_STREAM.with_schema("mavlink"))
+                .congestion_control(zenoh::qos::CongestionControl::Block)
+                .priority(zenoh::qos::Priority::RealTime)
+                .await
+                .expect("Failed to declare mavlink raw publisher"),
+        );
 
         let path = recorder_path.join(generate_filename());
         info!("Opening recording session");
@@ -60,6 +83,8 @@ impl Service {
             subscriber,
             mcap,
             vehicle_arm: VehicleArmGate::new(),
+            camera_discoverer: CameraDiscoverer::new(mavlink_publisher),
+            recording_capable_cameras: HashSet::new(),
             schema_path,
         }
     }
@@ -89,8 +114,13 @@ impl Service {
             let _sample_span = span.enter();
 
             if topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
-                crate::mavlink::handle_mavlink_message(&payload.to_bytes(), &mut self.vehicle_arm)
-                    .await;
+                mavlink::handle_mavlink_message(
+                    payload.to_bytes().as_ref(),
+                    &mut self.vehicle_arm,
+                    &self.camera_discoverer,
+                    &mut self.recording_capable_cameras,
+                )
+                .await;
             }
 
             if !self.should_record_sample(topic) {
