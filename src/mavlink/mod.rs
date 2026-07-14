@@ -1,26 +1,17 @@
+pub mod frame;
 pub mod vehicle;
 
 use ::mavlink::{
-    MavHeader,
-    ardupilotmega::{MavComponent, MavMessage},
-    peek_reader::PeekReader,
+    MavHeader, MessageData,
+    ardupilotmega::{HEARTBEAT_DATA, MavComponent, MavMessage},
 };
 use tracing::*;
 
-use self::vehicle::VehicleArmGate;
+use self::{frame::decode_mav_message, vehicle::VehicleArmGate};
 
 pub const RAW_MAVLINK_OUT_TOPIC: &str = "mavlink_raw/out";
 #[allow(unused)]
 pub const RAW_MAVLINK_IN_TOPIC: &str = "mavlink_raw/in";
-
-#[instrument(skip_all, level = "trace")]
-pub fn decode<R>(bytes: R) -> Result<(MavHeader, MavMessage), mavlink::error::MessageReadError>
-where
-    R: std::io::Read,
-{
-    let mut reader = PeekReader::new(bytes);
-    mavlink::read_any_msg(&mut reader)
-}
 
 #[allow(unused)]
 #[instrument(skip(message), level = "debug")]
@@ -34,22 +25,26 @@ pub fn encode(header: MavHeader, message: &MavMessage) -> Vec<u8> {
 
 #[instrument(skip_all, level = "trace")]
 pub async fn handle_mavlink_message(bytes: &[u8], vehicle_arm: &mut VehicleArmGate) {
-    let (header, message) = match decode(bytes) {
-        Ok(packet) => packet,
-        Err(error) => {
-            warn!("Failed decoding mavlink raw message: {error:?}");
-            return;
-        }
+    let mut decoder = frame::FrameDecoder::default();
+    let Some(packet) = decoder.decode(bytes) else {
+        return;
     };
 
-    match message {
-        MavMessage::HEARTBEAT(data)
-            if header.component_id == MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8 =>
-        {
-            trace!("Message decoded: {header:?}, {data:?}");
+    if packet.message_id() != HEARTBEAT_DATA::ID {
+        trace!("Message skipped");
+        return;
+    }
 
-            let _state = vehicle::on_heartbeat(vehicle_arm, &data);
-        }
-        _ => trace!("Message skipped"),
+    let Ok((header, message)) = decode_mav_message(&packet) else {
+        warn!("Failed decoding HEARTBEAT");
+        return;
+    };
+    let MavMessage::HEARTBEAT(data) = message else {
+        return;
+    };
+    if header.component_id == MavComponent::MAV_COMP_ID_AUTOPILOT1 as u8 {
+        trace!("Message decoded: {header:?}, {data:?}");
+
+        let _state = vehicle::on_heartbeat(vehicle_arm, &data);
     }
 }
