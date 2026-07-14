@@ -3,6 +3,8 @@ use once_cell::sync::OnceCell;
 use std::collections::HashMap;
 use tracing::*;
 
+use crate::mcap::{DEFAULT_CHUNK_BYTES, McapCompression, McapWriteConfig};
+
 static MANAGER: OnceCell<Manager> = OnceCell::new();
 
 struct Manager {
@@ -32,6 +34,18 @@ pub struct Args {
     /// Format: --zkey key=value
     #[arg(long, value_name = "KEY=VALUE", num_args = 1..)]
     zkey: Vec<String>,
+
+    /// MCAP chunk compression: lz4 (default), none, or zstd.
+    #[arg(long, value_enum, default_value_t = McapCompression::Lz4)]
+    mcap_compression: McapCompression,
+
+    /// Calculate MCAP chunk, data-section, summary, and attachment CRCs.
+    #[arg(long, default_value_t = true)]
+    mcap_crc: bool,
+
+    /// Target uncompressed MCAP chunk size in bytes before sealing.
+    #[arg(long, default_value_t = DEFAULT_CHUNK_BYTES, value_parser = parse_chunk_size)]
+    mcap_chunk_size: u64,
 }
 
 /// Constructs our manager, Should be done inside main
@@ -106,6 +120,24 @@ pub fn schema_path() -> Option<std::path::PathBuf> {
         .schema_path
         .as_ref()
         .map(|schema_path| path_dir_from_arg(schema_path, false))
+}
+
+pub fn mcap_write_config() -> McapWriteConfig {
+    McapWriteConfig {
+        compression: args().mcap_compression,
+        crc: args().mcap_crc,
+        chunk_size: args().mcap_chunk_size,
+    }
+}
+
+fn parse_chunk_size(raw: &str) -> Result<u64, String> {
+    let size = raw
+        .parse::<u64>()
+        .map_err(|error| format!("invalid mcap chunk size {raw:?}: {error}"))?;
+    if size == 0 {
+        return Err("mcap chunk size must be greater than zero".into());
+    }
+    Ok(size)
 }
 
 /// Returns the zenoh configuration key-value pairs as a HashMap

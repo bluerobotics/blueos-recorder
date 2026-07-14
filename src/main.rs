@@ -59,7 +59,7 @@ async fn recorder(subsystem: &mut SubsystemHandle) -> anyhow::Result<()> {
         config,
         cli::recorder_path(),
         cli::schema_path(),
-        mcap::McapWriteConfig::default(),
+        cli::mcap_write_config(),
     )
     .await;
     service.run(subsystem).await?;
