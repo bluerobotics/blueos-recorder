@@ -133,13 +133,12 @@ async fn worker_loop(
     let mut recording_capable = HashSet::new();
 
     while let Some(packet) = rx.recv().await {
-        let mut streams = video_streams.write().await;
         handle_mavlink_packet(
             packet,
             &mut vehicle_arm,
             &discoverer,
             &mut recording_capable,
-            &mut streams,
+            &video_streams,
             &publisher,
             &video_recording_gate,
         )

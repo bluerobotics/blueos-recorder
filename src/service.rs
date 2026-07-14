@@ -168,18 +168,22 @@ impl SampleProcessor {
 
     fn process_raw_mavlink(&self, topic: &str, sample: &Sample) {
         let payload = sample.payload().to_bytes();
-        let mut decoder = self.decoder.lock().expect("mavlink decoder poisoned");
-        let Some(packet) = decoder.decode(payload.as_ref()) else {
+        let Some(msg_id) = mavlink::frame::frame_msg_id(payload.as_ref()) else {
             return;
         };
 
+        // Only the handful of message ids the worker acts on are worth the full
+        // codec decode and cross-thread enqueue; the rest are just recorded.
+        if mavlink::frame::needed_while_disarmed(msg_id) {
+            let mut decoder = self.decoder.lock().expect("mavlink decoder poisoned");
+            if let Some(packet) = decoder.decode(payload.as_ref()) {
+                self.mavlink_worker.try_enqueue(packet);
+            }
+        }
+
         if self.mavlink_worker.is_armed() {
-            let wire = packet.bytes().clone();
-            self.mavlink_worker.try_enqueue(packet);
-            drop(decoder);
+            let wire = Bytes::copy_from_slice(payload.as_ref());
             self.write_recording(topic, sample, wire);
-        } else if mavlink::frame::needed_while_disarmed(packet.message_id()) {
-            self.mavlink_worker.try_enqueue(packet);
         }
     }
 

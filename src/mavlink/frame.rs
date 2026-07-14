@@ -48,6 +48,31 @@ impl FrameDecoder {
     }
 }
 
+/// Extract the MAVLink message id from a single raw frame without running the
+/// codec (no CRC validation, no payload parse). Each `mavlink_raw/out` sample
+/// carries exactly one frame, so a header read is enough to decide whether the
+/// packet needs full decoding. Returns `None` if the buffer is too short or the
+/// magic byte is not a recognized MAVLink version.
+pub fn frame_msg_id(data: &[u8]) -> Option<u32> {
+    match data.first()? {
+        // MAVLink v2: [magic, len, incompat, compat, seq, sysid, compid, msgid(3, LE), ...]
+        0xFD => {
+            if data.len() < 10 {
+                return None;
+            }
+            Some(u32::from(data[7]) | (u32::from(data[8]) << 8) | (u32::from(data[9]) << 16))
+        }
+        // MAVLink v1: [magic, len, seq, sysid, compid, msgid, ...]
+        0xFE => {
+            if data.len() < 6 {
+                return None;
+            }
+            Some(u32::from(data[5]))
+        }
+        _ => None,
+    }
+}
+
 pub fn needed_while_disarmed(msg_id: u32) -> bool {
     matches!(
         msg_id,

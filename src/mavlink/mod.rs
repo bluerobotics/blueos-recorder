@@ -8,6 +8,8 @@ use std::{
     sync::Arc,
 };
 
+use tokio::sync::RwLock;
+
 use ::mavlink::{
     MavHeader, MessageData,
     ardupilotmega::{
@@ -93,7 +95,7 @@ pub async fn handle_mavlink_packet(
     vehicle_arm: &mut VehicleArmGate,
     discoverer: &CameraDiscoverer,
     recording_capable: &mut HashSet<SystemAndComponent>,
-    video_streams: &mut HashMap<String, VideoStream>,
+    video_streams: &RwLock<HashMap<String, VideoStream>>,
     publisher: &Arc<Publisher<'static>>,
     video_recording_gate: &Arc<VideoRecordingGate>,
 ) {
@@ -157,7 +159,7 @@ pub async fn handle_mavlink_packet(
                 },
                 &data,
                 recording_capable,
-                video_streams,
+                &mut *video_streams.write().await,
                 video_recording_gate,
             );
         }
@@ -169,7 +171,7 @@ pub async fn handle_mavlink_packet(
             let MavMessage::COMMAND_LONG(data) = message else {
                 return;
             };
-            camera::on_command_long(&data, video_streams, publisher).await;
+            camera::on_command_long(&data, &mut *video_streams.write().await, publisher).await;
         }
         _ => trace!("Message skipped"),
     }
