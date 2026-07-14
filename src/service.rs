@@ -1,5 +1,6 @@
 use std::{
     borrow::Cow,
+    collections::HashSet,
     path::PathBuf,
     sync::{Arc, Mutex},
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -79,6 +80,7 @@ impl Service {
             mcap: mcap.writer(),
             mavlink_worker,
             decoder: Mutex::new(FrameDecoder::default()),
+            video_gate_skip_logged: Mutex::new(HashSet::new()),
             schema_path,
         });
 
@@ -139,6 +141,7 @@ pub struct SampleProcessor {
     mcap: Arc<McapWriter>,
     mavlink_worker: MavlinkWorker,
     decoder: Mutex<FrameDecoder>,
+    video_gate_skip_logged: Mutex<HashSet<String>>,
     schema_path: Option<PathBuf>,
 }
 
@@ -208,9 +211,41 @@ impl SampleProcessor {
 
     fn should_record_sample(&self, topic: &str) -> bool {
         if topic.starts_with("mavlink/") {
-            self.mavlink_worker.is_armed()
+            if self.mavlink_worker.is_armed() {
+                true
+            } else {
+                trace!("Skipping MAVLink sample: vehicle disarmed");
+                false
+            }
         } else if topic.starts_with("video/") {
-            self.mavlink_worker.is_video_recording(topic)
+            let gate = self.mavlink_worker.video_recording_gate();
+            if gate.is_recording(topic) {
+                self.video_gate_skip_logged
+                    .lock()
+                    .expect("video gate skip log poisoned")
+                    .remove(topic);
+                true
+            } else if gate.is_registered(topic) {
+                if self
+                    .video_gate_skip_logged
+                    .lock()
+                    .expect("video gate skip log poisoned")
+                    .insert(format!("idle:{topic}"))
+                {
+                    debug!("Skipping video sample: stream registered but not recording");
+                }
+                false
+            } else if self
+                .video_gate_skip_logged
+                .lock()
+                .expect("video gate skip log poisoned")
+                .insert(format!("unknown:{topic}"))
+            {
+                debug!("Skipping video sample: topic not registered");
+                false
+            } else {
+                false
+            }
         } else {
             true
         }
