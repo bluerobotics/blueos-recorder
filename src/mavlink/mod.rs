@@ -1,6 +1,7 @@
 pub mod camera;
 pub mod frame;
 pub mod vehicle;
+pub mod worker;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -14,6 +15,7 @@ use ::mavlink::{
         MavMessage, MavType, VIDEO_STREAM_INFORMATION_DATA,
     },
 };
+use mavlink_codec::Packet;
 use tracing::*;
 use zenoh::pubsub::Publisher;
 
@@ -79,20 +81,18 @@ pub(crate) fn mavlink_string(bytes: &[u8]) -> &str {
 }
 
 #[instrument(skip_all, level = "trace")]
-pub async fn handle_mavlink_message(
-    bytes: &[u8],
+pub async fn handle_mavlink_packet(
+    packet: Packet,
     vehicle_arm: &mut VehicleArmGate,
     discoverer: &CameraDiscoverer,
     recording_capable: &mut HashSet<SystemAndComponent>,
     video_streams: &mut HashMap<String, VideoStream>,
     publisher: &Arc<Publisher<'static>>,
 ) {
-    let mut decoder = frame::FrameDecoder::default();
-    let Some(packet) = decoder.decode(bytes) else {
-        return;
-    };
-
     let msg_id = packet.message_id();
+    if !vehicle_arm.is_armed() && !frame::needed_while_disarmed(msg_id) {
+        return;
+    }
 
     match msg_id {
         id if id == HEARTBEAT_DATA::ID => {

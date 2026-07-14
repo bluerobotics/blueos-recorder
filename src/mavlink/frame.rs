@@ -1,5 +1,11 @@
 use bytes::BytesMut;
-use mavlink::{MavlinkVersion, Message, ardupilotmega::MavMessage};
+use mavlink::{
+    MavlinkVersion, Message, MessageData,
+    ardupilotmega::{
+        CAMERA_INFORMATION_DATA, COMMAND_LONG_DATA, HEARTBEAT_DATA, MavMessage,
+        VIDEO_STREAM_INFORMATION_DATA,
+    },
+};
 use mavlink_codec::{Packet, codec::MavlinkCodec};
 use tokio_util::codec::Decoder;
 use tracing::*;
@@ -40,6 +46,16 @@ impl FrameDecoder {
             }
         }
     }
+}
+
+pub fn needed_while_disarmed(msg_id: u32) -> bool {
+    matches!(
+        msg_id,
+        HEARTBEAT_DATA::ID
+            | COMMAND_LONG_DATA::ID
+            | CAMERA_INFORMATION_DATA::ID
+            | VIDEO_STREAM_INFORMATION_DATA::ID
+    )
 }
 
 pub fn decode_mav_message(
