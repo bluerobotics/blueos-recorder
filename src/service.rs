@@ -7,7 +7,7 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 use crate::{
     channel_descriptor::ChannelDescriptor,
     mavlink::{RAW_MAVLINK_OUT_TOPIC, vehicle::VehicleArmGate},
-    mcap::Mcap,
+    mcap::{Mcap, McapWriteConfig},
 };
 
 pub struct Service {
@@ -38,6 +38,7 @@ impl Service {
         config: Config,
         recorder_path: std::path::PathBuf,
         schema_path: Option<std::path::PathBuf>,
+        mcap_config: McapWriteConfig,
     ) -> Self {
         let session = zenoh::open(config)
             .await
@@ -50,7 +51,7 @@ impl Service {
         let path = recorder_path.join(generate_filename());
         info!("Opening recording session");
 
-        let mcap = Mcap::try_new(&path).unwrap();
+        let mcap = Mcap::try_new(&path, mcap_config).expect("Failed to open MCAP file");
         Self {
             session,
             subscriber,

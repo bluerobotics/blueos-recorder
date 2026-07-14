@@ -2,15 +2,78 @@ use std::{
     collections::{BTreeMap, HashMap},
     fs::File,
     io::BufWriter,
+    path::Path,
 };
 
 use anyhow::{Context, Result, anyhow};
-use mcap::Writer;
+use clap::ValueEnum;
+use mcap::{Compression, Writer, write::WriteOptions};
 use tracing::*;
 
 use crate::channel_descriptor::ChannelDescriptor;
 
 const NO_SCHEMA_ID: u16 = 0; // "A schema_id of 0 indicates there is no schema for this channel." (https://mcap.dev/spec#channel-op0x04)
+const IO_BUFFER_BYTES: usize = 4 * 1024 * 1024;
+pub const DEFAULT_CHUNK_BYTES: u64 = 10 * 1024 * 1024;
+
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+pub enum McapCompression {
+    None,
+    #[default]
+    Lz4,
+    Zstd,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct McapWriteConfig {
+    pub compression: McapCompression,
+    pub crc: bool,
+    pub chunk_size: u64,
+}
+
+impl Default for McapWriteConfig {
+    fn default() -> Self {
+        Self {
+            compression: McapCompression::Lz4,
+            crc: true,
+            chunk_size: DEFAULT_CHUNK_BYTES,
+        }
+    }
+}
+
+impl McapWriteConfig {
+    pub fn write_options(self) -> WriteOptions {
+        let compression = match self.compression {
+            McapCompression::None => None,
+            McapCompression::Lz4 => Some(Compression::Lz4),
+            McapCompression::Zstd => Some(Compression::Zstd),
+        };
+
+        WriteOptions::new()
+            .compression(compression)
+            .chunk_size(Some(self.chunk_size))
+            .compression_threads(if matches!(self.compression, McapCompression::None) {
+                0
+            } else {
+                2
+            })
+            .calculate_chunk_crcs(self.crc)
+            .calculate_data_section_crc(self.crc)
+            .calculate_summary_section_crc(self.crc)
+            .calculate_attachment_crcs(self.crc)
+            .emit_message_indexes(true) // unindexing limits the files to 1GB
+    }
+
+    fn open_writer(path: &Path, config: Self) -> Result<Writer<BufWriter<File>>> {
+        let file = std::fs::File::create(path).context("Failed to create MCAP file")?;
+        let io_buffer_bytes = IO_BUFFER_BYTES.max(config.chunk_size as usize);
+        Writer::with_options(
+            BufWriter::with_capacity(io_buffer_bytes, file),
+            config.write_options(),
+        )
+        .context("Failed to create MCAP writer")
+    }
+}
 
 pub struct Mcap {
     writer: Option<Writer<BufWriter<File>>>,
@@ -24,10 +87,15 @@ pub struct Channel {
 
 impl Mcap {
     #[instrument(skip_all, fields(path = %path.display()))]
-    pub fn try_new(path: &std::path::Path) -> Result<Self> {
-        info!("Creating mcap file");
-        let file = std::fs::File::create(path).context("Failed to create MCAP file")?;
-        let writer = Writer::new(BufWriter::new(file)).context("Failed to create MCAP writer")?;
+    pub fn try_new(path: &Path, config: McapWriteConfig) -> Result<Self> {
+        info!(
+            compression = ?config.compression,
+            crc = config.crc,
+            chunk_bytes = config.chunk_size,
+            io_buffer_bytes = IO_BUFFER_BYTES.max(config.chunk_size as usize),
+            "Opening MCAP file"
+        );
+        let writer = McapWriteConfig::open_writer(path, config)?;
         Ok(Self {
             writer: Some(writer),
             channel: HashMap::new(),
@@ -89,6 +157,7 @@ impl Mcap {
             )
             .context("Failed to add MCAP channel")?;
 
+        info!(topic = %desc.topic, "Adding channel");
         self.channel.insert(desc.topic, Channel::new(channel_id));
         Ok(())
     }
