@@ -1,4 +1,7 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio_graceful_shutdown::SubsystemHandle;
 use tracing::*;
@@ -6,7 +9,7 @@ use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, s
 
 use crate::{
     channel_descriptor::ChannelDescriptor,
-    mavlink::{RAW_MAVLINK_OUT_TOPIC, vehicle::VehicleArmGate},
+    mavlink::{self, RAW_MAVLINK_OUT_TOPIC, worker::MavlinkWorker},
     mcap::Mcap,
 };
 
@@ -15,8 +18,14 @@ pub struct Service {
     session: Session,
     subscriber: Subscriber<FifoChannelHandler<Sample>>,
     mcap: Mcap,
-    vehicle_arm: VehicleArmGate,
+    mavlink_worker: MavlinkWorker,
     schema_path: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct SystemAndComponent {
+    pub system_id: u8,
+    pub component_id: u8,
 }
 
 fn generate_filename() -> String {
@@ -46,16 +55,26 @@ impl Service {
             .declare_subscriber("**")
             .await
             .expect("Failed to declare global zenoh subscriber");
+        let mavlink_publisher = Arc::new(
+            session
+                .declare_publisher(mavlink::RAW_MAVLINK_IN_TOPIC)
+                .encoding(zenoh::bytes::Encoding::APPLICATION_OCTET_STREAM.with_schema("mavlink"))
+                .congestion_control(zenoh::qos::CongestionControl::Block)
+                .priority(zenoh::qos::Priority::RealTime)
+                .await
+                .expect("Failed to declare mavlink raw publisher"),
+        );
 
         let path = recorder_path.join(generate_filename());
         info!("Opening recording session");
 
         let mcap = Mcap::try_new(&path).unwrap();
+        let mavlink_worker = MavlinkWorker::new(mavlink_publisher);
         Self {
             session,
             subscriber,
             mcap,
-            vehicle_arm: VehicleArmGate::new(),
+            mavlink_worker,
             schema_path,
         }
     }
@@ -85,11 +104,10 @@ impl Service {
             let _sample_span = span.enter();
 
             if topic.starts_with(RAW_MAVLINK_OUT_TOPIC) {
-                crate::mavlink::handle_mavlink_message(&payload.to_bytes(), &mut self.vehicle_arm)
-                    .await;
+                self.mavlink_worker.try_enqueue(payload);
             }
 
-            if !self.should_record_sample(topic) {
+            if !should_record_sample(&self.mavlink_worker, topic) {
                 continue;
             }
 
@@ -138,15 +156,14 @@ impl Service {
 
         Ok(())
     }
+}
 
-    fn should_record_sample(&self, topic: &str) -> bool {
-        if topic.starts_with("mavlink/")
-            || topic.starts_with("mavlink_raw/")
-            || topic.starts_with("video/")
-        {
-            self.vehicle_arm.is_armed()
-        } else {
-            true
-        }
+fn should_record_sample(worker: &MavlinkWorker, topic: &str) -> bool {
+    if topic.starts_with("mavlink/") || topic.starts_with("mavlink_raw/") {
+        worker.is_armed()
+    } else if topic.starts_with("video/") {
+        worker.is_video_recording(topic)
+    } else {
+        true
     }
 }
