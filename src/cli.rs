@@ -1,7 +1,12 @@
+use std::{collections::HashMap, num::NonZeroU64};
+
 use clap::Parser;
 use once_cell::sync::OnceCell;
-use std::collections::HashMap;
 use tracing::*;
+
+use crate::mcap::{
+    DEFAULT_CHUNK_BYTES, DEFAULT_FLUSH_INTERVAL_SECS, McapCompression, McapWriteConfig,
+};
 
 static MANAGER: OnceCell<Manager> = OnceCell::new();
 
@@ -32,6 +37,18 @@ pub struct Args {
     /// Format: --zkey key=value
     #[arg(long, value_name = "KEY=VALUE", num_args = 1..)]
     zkey: Vec<String>,
+
+    /// MCAP chunk compression: lz4 (default), none, or zstd.
+    #[arg(long, value_enum, default_value_t = McapCompression::Lz4)]
+    mcap_compression: McapCompression,
+
+    /// Target uncompressed MCAP chunk size in bytes before sealing.
+    #[arg(long, default_value_t = DEFAULT_CHUNK_BYTES)]
+    mcap_chunk_size: NonZeroU64,
+
+    /// Interval in seconds between periodic MCAP flushes.
+    #[arg(long, default_value_t = DEFAULT_FLUSH_INTERVAL_SECS)]
+    mcap_flush_interval_secs: NonZeroU64,
 }
 
 /// Constructs our manager, Should be done inside main
@@ -106,6 +123,14 @@ pub fn schema_path() -> Option<std::path::PathBuf> {
         .schema_path
         .as_ref()
         .map(|schema_path| path_dir_from_arg(schema_path, false))
+}
+
+pub fn mcap_write_config() -> McapWriteConfig {
+    McapWriteConfig {
+        compression: args().mcap_compression,
+        chunk_size: args().mcap_chunk_size,
+        flush_interval_secs: args().mcap_flush_interval_secs,
+    }
 }
 
 /// Returns the zenoh configuration key-value pairs as a HashMap
