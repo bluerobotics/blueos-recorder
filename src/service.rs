@@ -1,11 +1,15 @@
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    borrow::Cow,
+    collections::HashSet,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use tokio_graceful_shutdown::SubsystemHandle;
 use tracing::*;
 use zenoh::{Config, Session, handlers::FifoChannelHandler, pubsub::Subscriber, sample::Sample};
 
 use crate::{
-    channel_descriptor::ChannelDescriptor,
+    channel_descriptor::{ChannelDescriptor, wrap_json_payload},
     mavlink::{RAW_MAVLINK_OUT_TOPIC, vehicle::VehicleArmGate},
     mcap::Mcap,
 };
@@ -17,6 +21,8 @@ pub struct Service {
     mcap: Mcap,
     vehicle_arm: VehicleArmGate,
     schema_path: Option<std::path::PathBuf>,
+    /// Topics whose JSON payloads are written as `{"value": <payload>}`
+    wrapped_topics: HashSet<String>,
 }
 
 fn generate_filename() -> String {
@@ -57,6 +63,7 @@ impl Service {
             mcap,
             vehicle_arm: VehicleArmGate::new(),
             schema_path,
+            wrapped_topics: HashSet::new(),
         }
     }
 
@@ -104,8 +111,20 @@ impl Service {
                 };
 
                 info!("Adding channel");
+                if channel_descriptor.wrap_json_value {
+                    self.wrapped_topics.insert(topic.to_owned());
+                }
                 Some(channel_descriptor)
             };
+
+            let mut bytes = payload.to_bytes();
+            if self.wrapped_topics.contains(topic) {
+                let Some(wrapped) = wrap_json_payload(&bytes) else {
+                    warn!("Failed to wrap non-object JSON payload");
+                    continue;
+                };
+                bytes = Cow::Owned(wrapped);
+            }
 
             let now = SystemTime::now();
             let log_time = now.duration_since(UNIX_EPOCH).unwrap().as_nanos() as u64;
@@ -113,13 +132,10 @@ impl Service {
                 .timestamp()
                 .map(|ts| ts.get_time().as_nanos())
                 .unwrap_or(log_time);
-            if let Err(error) = self.mcap.write_message(
-                topic,
-                log_time,
-                publish_time,
-                &payload.to_bytes(),
-                new_channel,
-            ) {
+            if let Err(error) =
+                self.mcap
+                    .write_message(topic, log_time, publish_time, &bytes, new_channel)
+            {
                 error!(%error, "Failed to write MCAP message");
                 continue;
             }

@@ -9,6 +9,10 @@ pub struct ChannelDescriptor {
     pub topic: String,
     pub schema: Option<SchemaDescriptor>,
     pub message_encoding: MessageEncoding,
+    /// The topic carries JSON values that are not objects (arrays, numbers, strings...).
+    /// Foxglove only reads objects, so each message is written as `{"value": <payload>}`
+    /// (see [`wrap_json_payload`]) and the schema describes that wrapper.
+    pub wrap_json_value: bool,
 }
 
 pub struct SchemaDescriptor {
@@ -78,6 +82,7 @@ impl ChannelDescriptor {
                         }),
                     }),
                     message_encoding: MessageEncoding::Cdr,
+                    wrap_json_value: false,
                 })
             }
             (encoding, schema) if encoding == json => {
@@ -85,13 +90,16 @@ impl ChannelDescriptor {
                     warn!("Failed to decode payload as UTF-8 string");
                     return None;
                 };
-                let Ok(value) = serde_json5::from_str::<Value>(&string) else {
+                let Ok(mut value) = serde_json5::from_str::<Value>(&string) else {
                     warn!(payload = %string, "Failed to parse payload as JSON5");
                     return None;
                 };
-                // Foxglove does not support non-object messages
-                if !value.is_object() {
-                    return None;
+                // Foxglove does not support non-object messages, so they are recorded
+                // wrapped in an object instead of being dropped
+                let wrap_json_value = !value.is_object();
+                if wrap_json_value {
+                    info!("Recording non-object JSON payloads as {{\"value\": <payload>}}");
+                    value = json!({ "value": value });
                 }
                 let schema_name = match schema {
                     Some(name) => name.to_owned(),
@@ -108,12 +116,14 @@ impl ChannelDescriptor {
                         }),
                     }),
                     message_encoding: MessageEncoding::Json,
+                    wrap_json_value,
                 })
             }
             (encoding, _schema) if encoding == octet => Some(Self {
                 topic: topic.to_owned(),
                 schema: None,
                 message_encoding: MessageEncoding::OctetStream,
+                wrap_json_value: false,
             }),
             _ => {
                 warn!(encoding = %encoding, "Received unknown encoding");
@@ -121,6 +131,14 @@ impl ChannelDescriptor {
             }
         }
     }
+}
+
+/// Turns a JSON (or JSON5) payload into the `{"value": <payload>}` object written for
+/// channels with [`ChannelDescriptor::wrap_json_value`] set.
+pub fn wrap_json_payload(payload: &[u8]) -> Option<Vec<u8>> {
+    let string = std::str::from_utf8(payload).ok()?;
+    let value = serde_json5::from_str::<Value>(string).ok()?;
+    serde_json::to_vec(&json!({ "value": value })).ok()
 }
 
 impl SchemaEncoding {
@@ -204,5 +222,87 @@ fn create_schema(value: &Value) -> Value {
                 .collect();
             json!({ "type": "object", "properties": properties })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn json_descriptor(payload: &str) -> ChannelDescriptor {
+        ChannelDescriptor::new(
+            "services/system_information/cpu",
+            &Encoding::APPLICATION_JSON,
+            &ZBytes::from(payload),
+            None,
+        )
+        .expect("JSON payloads should get a channel")
+    }
+
+    fn schema(descriptor: &ChannelDescriptor) -> Value {
+        let content = descriptor
+            .schema
+            .as_ref()
+            .unwrap()
+            .content
+            .as_ref()
+            .unwrap();
+        serde_json::from_str(&content.data).unwrap()
+    }
+
+    #[test]
+    fn array_payload_gets_a_wrapped_channel() {
+        let descriptor = json_descriptor(r#"[{"name": "cpu0", "usage": 12.5}]"#);
+        assert!(descriptor.wrap_json_value);
+        assert_eq!(descriptor.message_encoding, MessageEncoding::Json);
+        let schema = schema(&descriptor);
+        assert_eq!(schema["type"], "object");
+        assert_eq!(schema["properties"]["value"]["type"], "array");
+        assert_eq!(
+            schema["properties"]["value"]["items"]["properties"]["usage"]["type"],
+            "number"
+        );
+    }
+
+    #[test]
+    fn scalar_payloads_get_a_wrapped_channel() {
+        for (payload, kind) in [
+            ("1763400000", "integer"),
+            ("12.5", "number"),
+            ("\"text\"", "string"),
+            ("true", "boolean"),
+        ] {
+            let descriptor = json_descriptor(payload);
+            assert!(descriptor.wrap_json_value, "{payload}");
+            assert_eq!(schema(&descriptor)["properties"]["value"]["type"], kind);
+        }
+    }
+
+    #[test]
+    fn object_payload_is_unchanged() {
+        let descriptor = json_descriptor(r#"{"total": 4096, "used": 1024}"#);
+        assert!(!descriptor.wrap_json_value);
+        let schema = schema(&descriptor);
+        assert_eq!(schema["properties"]["total"]["type"], "integer");
+        assert!(schema["properties"].get("value").is_none());
+    }
+
+    #[test]
+    fn wrapped_payload_matches_the_schema() {
+        let wrapped = wrap_json_payload(br#"[{"name": "cpu0", "usage": 12.5}]"#).unwrap();
+        let wrapped: Value = serde_json::from_slice(&wrapped).unwrap();
+        assert_eq!(
+            wrapped,
+            json!({ "value": [{ "name": "cpu0", "usage": 12.5 }] })
+        );
+
+        let wrapped = wrap_json_payload(b"42").unwrap();
+        assert_eq!(wrapped, br#"{"value":42}"#);
+
+        // JSON5, as accepted when the channel is created
+        let wrapped = wrap_json_payload(b"['a', 1,]").unwrap();
+        assert_eq!(wrapped, br#"{"value":["a",1]}"#);
+
+        assert!(wrap_json_payload(b"not json").is_none());
     }
 }
